@@ -18,7 +18,7 @@ ir_parse_replace_when(expr, env, schema)
 
 ## Details
 
-No named arguments are supported this wave (the real
+No named arguments are supported (the real
 [`replace_when()`](https://dplyr.tidyverse.org/reference/case-and-replace-when.html)
 signature is just `replace_when(x, ...)` anyway) – any named dot present
 makes this return `NULL` (fall back).

@@ -25,10 +25,10 @@ cast_column(tbl, col_name, target_type, source_levels = NULL)
 - source_levels:
 
   For a `DICTIONARY32` source column being cast to `STRING` (dplyr's
-  factor + character -\> character contract, Bug 3 of Phase 11 L2): this
-  column's OWN level vector, decoded via `gpu_decode_factor()` instead
-  of `gpu_cast_to_string()`'s numeric-only path (which only ever sees
-  the PHYSICAL INT32 column and would silently emit its raw codes as
+  factor + character -\> character contract): this column's OWN level
+  vector, decoded via `gpu_decode_factor()` instead of
+  `gpu_cast_to_string()`'s numeric-only path (which only ever sees the
+  PHYSICAL INT32 column and would silently emit its raw codes as
   strings, e.g. `"2"` instead of `"m"`). `NULL`/unused for every other
   source type.
 

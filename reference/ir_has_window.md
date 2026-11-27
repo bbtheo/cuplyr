@@ -1,17 +1,16 @@
 # Does an IR (sub)tree contain a window-function call anywhere?
 
-Phase 5 (window functions, `scratchpad/phase5_window_design.md` section
-1.1): `TRUE` iff any `call` node in the subtree has a non-`NULL`
-`window` field in its
+`TRUE` iff any `call` node in the subtree has a non-`NULL` `window`
+field in its
 [ir_call_registry](https://bbtheo.github.io/cuplyr/reference/ir_call_registry.md)
 entry. Used by
 [`ir_bind()`](https://bbtheo.github.io/cuplyr/reference/ir_bind.md)'s
 window guard, by the decomposition machinery in `R/window.R`
 ([`ir_extract_windows()`](https://bbtheo.github.io/cuplyr/reference/ir_extract_windows.md)/[`plan_window_stages()`](https://bbtheo.github.io/cuplyr/reference/plan_window_stages.md)),
-and will be used by the as-yet-unwired grouped
-[`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html)/[`filter()`](https://dplyr.tidyverse.org/reference/filter.html)
-(W3/W5) to detect when a parsed expression needs the window
-decomposition path at all.
+and by verbs such as
+[`filter()`](https://dplyr.tidyverse.org/reference/filter.html) and
+[`slice()`](https://dplyr.tidyverse.org/reference/slice.html) to detect
+when a parsed expression needs the window decomposition path at all.
 
 ## Usage
 

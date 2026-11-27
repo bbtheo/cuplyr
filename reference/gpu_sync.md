@@ -33,5 +33,5 @@ if (has_gpu()) {
   gpu_sync()
   Sys.time() - t0
 }
-#> Time difference of 0.1385469 secs
+#> Time difference of 0.1315472 secs
 ```

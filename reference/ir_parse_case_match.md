@@ -7,8 +7,7 @@ See
 is deprecated in dplyr 1.2.1 in favor of
 [`recode_values()`](https://dplyr.tidyverse.org/reference/recode-and-replace-values.html)/[`replace_values()`](https://dplyr.tidyverse.org/reference/recode-and-replace-values.html)
 (verified: calling it emits a lifecycle warning), but is still exported
-and functional, and is explicitly in this wave's scope, so it's
-implemented identically to
+and functional, so it's implemented identically to
 [`recode_values()`](https://dplyr.tidyverse.org/reference/recode-and-replace-values.html)'s
 formula interface, just with `.default` as the named key instead of
 `default`.

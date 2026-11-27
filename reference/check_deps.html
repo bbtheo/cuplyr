@@ -11,7 +11,7 @@ R version, and required R packages."><meta property="og:image" content="https://
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -82,10 +82,21 @@ R version, and required R packages.</p>
     <div class="section level2">
     <h2 id="details">Details<a class="anchor" aria-label="anchor" href="#details"></a></h2>
     <p>The following checks are performed:</p><ol><li><p><strong>NVIDIA Driver</strong>: Verifies <code>nvidia-smi</code> is available and reports
-driver version</p></li>
-<li><p><strong>CUDA Toolkit</strong>: Checks for <code>nvcc</code>, validates CUDA &gt;= 12.2, and
-reports CUDA version</p></li>
-<li><p><strong>libcudf</strong>: Looks for cudf headers in standard paths</p></li>
+the driver version, read with <code>nvidia-smi --query-gpu=driver_version</code>
+and, failing that, from the <code>Driver Version:</code> or <code>KMD Version:</code> header</p></li>
+<li><p><strong>CUDA Toolkit</strong>: Looks for <code>nvcc</code> in <code>CUDA_HOME</code>, <code>CONDA_PREFIX</code>,
+the environment of the libcudf that cuplyr has loaded, the pixi
+environment (<code>PIXI_PROJECT_ROOT</code>, or <code>.pixi</code> in the working
+directory), the system CUDA directories and <code>PATH</code>, in that order.
+Validates CUDA &gt;= 12.2 and reports the CUDA version</p></li>
+<li><p><strong>libcudf</strong>: Reports the libcudf that cuplyr has loaded, if any.
+Otherwise looks for cudf headers and <code>libcudf.so</code> under <code>CUDF_HOME</code>,
+<code>CONDA_PREFIX</code>, the pixi environment (<code>PIXI_PROJECT_ROOT</code>, or <code>.pixi</code>
+in the working directory) and standard paths. A <code>CUDF_HOME</code> or
+<code>CONDA_PREFIX</code> that points to a missing directory is named in the
+message but does not fail the check by itself. The check reports the
+libcudf version it finds (from <code>cudf/version_config.hpp</code>) and fails for
+a libcudf older than 26.02; a version it can't read is not a failure.</p></li>
 <li><p><strong>R Version</strong>: Checks R &gt;= 4.3.0</p></li>
 <li><p><strong>R Packages</strong>: Verifies required R packages are installed</p></li>
 <li><p><strong>GPU Access</strong>: Tests if a GPU device is accessible (if cuplyr
@@ -103,9 +114,9 @@ is already installed)</p></li>
 <span class="r-in"><span><span class="fu">check_deps</span><span class="op">(</span><span class="op">)</span></span></span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> cuplyr dependency check</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> -------------------------------------------------- </span>
-<span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #00BB00;">✔</span> NVIDIA Driver: nvidia-smi found (version unknown)</span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #00BB00;">✔</span> NVIDIA Driver: Driver version 615.78.08</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #00BB00;">✔</span> CUDA Toolkit: CUDA 13.4 at /opt/cuda</span>
-<span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #00BB00;">✔</span> libcudf: Found headers and libcudf.so at /home/theo/cuplr/.pixi/envs/default</span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #00BB00;">✔</span> libcudf: libcudf loaded by cuplyr from /home/theo/cuplr/.pixi/envs/default/lib/libcudf.so (libcudf 26.10.2). Note: CUDF_HOME is set to '/home/theo/cuplr/rapids-dev/lib/python3.12/site-packages/libcudf', which does not exist.</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #00BB00;">✔</span> R Version: R 4.6.1</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #00BB00;">✔</span> R Packages: All 7 required packages installed</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #00BB00;">✔</span> GPU Access: GPU accessible: NVIDIA GeForce RTX 5070</span>
@@ -118,9 +129,9 @@ is already installed)</p></li>
 <span class="r-out co"><span class="r-pr">#&gt;</span> {</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span>   "ok": true,</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span>   "checks": {</span>
-<span class="r-out co"><span class="r-pr">#&gt;</span>     "nvidia_driver": {"ok": true, "value": null, "message": "nvidia-smi found (version unknown)"},</span>
+<span class="r-out co"><span class="r-pr">#&gt;</span>     "nvidia_driver": {"ok": true, "value": "615.78.08", "message": "Driver version 615.78.08"},</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span>     "cuda_toolkit": {"ok": true, "value": "13.4", "message": "CUDA 13.4 at /opt/cuda"},</span>
-<span class="r-out co"><span class="r-pr">#&gt;</span>     "libcudf": {"ok": true, "value": "/home/theo/cuplr/.pixi/envs/default", "message": "Found headers and libcudf.so at /home/theo/cuplr/.pixi/envs/default"},</span>
+<span class="r-out co"><span class="r-pr">#&gt;</span>     "libcudf": {"ok": true, "value": "/home/theo/cuplr/.pixi/envs/default", "message": "libcudf loaded by cuplyr from /home/theo/cuplr/.pixi/envs/default/lib/libcudf.so (libcudf 26.10.2). Note: CUDF_HOME is set to '/home/theo/cuplr/rapids-dev/lib/python3.12/site-packages/libcudf', which does not exist."},</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span>     "r_version": {"ok": true, "value": "4.6.1", "message": "R 4.6.1"},</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span>     "r_packages": {"ok": true, "value": "Rcpp, dplyr, rlang, vctrs, cli, tidyselect, tibble", "message": "All 7 required packages installed"},</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span>     "gpu_access": {"ok": true, "value": "NVIDIA GeForce RTX 5070", "message": "GPU accessible: NVIDIA GeForce RTX 5070"}</span>
@@ -131,9 +142,9 @@ is already installed)</p></li>
 <span class="r-in"><span><span class="va">result</span> <span class="op">&lt;-</span> <span class="fu">check_deps</span><span class="op">(</span><span class="op">)</span></span></span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> cuplyr dependency check</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> -------------------------------------------------- </span>
-<span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #00BB00;">✔</span> NVIDIA Driver: nvidia-smi found (version unknown)</span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #00BB00;">✔</span> NVIDIA Driver: Driver version 615.78.08</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #00BB00;">✔</span> CUDA Toolkit: CUDA 13.4 at /opt/cuda</span>
-<span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #00BB00;">✔</span> libcudf: Found headers and libcudf.so at /home/theo/cuplr/.pixi/envs/default</span>
+<span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #00BB00;">✔</span> libcudf: libcudf loaded by cuplyr from /home/theo/cuplr/.pixi/envs/default/lib/libcudf.so (libcudf 26.10.2). Note: CUDF_HOME is set to '/home/theo/cuplr/rapids-dev/lib/python3.12/site-packages/libcudf', which does not exist.</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #00BB00;">✔</span> R Version: R 4.6.1</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #00BB00;">✔</span> R Packages: All 7 required packages installed</span>
 <span class="r-out co"><span class="r-pr">#&gt;</span> <span style="color: #00BB00;">✔</span> GPU Access: GPU accessible: NVIDIA GeForce RTX 5070</span>

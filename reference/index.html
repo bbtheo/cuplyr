@@ -7,7 +7,7 @@
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -60,7 +60,7 @@
           <code><a href="arrange.tbl_gpu.html">arrange(<i>&lt;tbl_gpu&gt;</i>)</a></code>
 
         </dt>
-        <dd>Arrange rows of a GPU table by column values</dd>
+        <dd>Order rows using column values</dd>
 
         <dt>
 
@@ -78,7 +78,7 @@
 
         <dt>
 
-          <code><a href="as_tbl_gpu.html">as_tbl_gpu()</a></code> <code><a href="as_tbl_gpu.html">as_gibble()</a></code>
+          <code><a href="as_tbl_gpu.html">as_tbl_gpu()</a></code>
 
         </dt>
         <dd>Coerce to a GPU table</dd>
@@ -137,7 +137,7 @@
           <code><a href="cross_join.tbl_gpu.html">cross_join(<i>&lt;tbl_gpu&gt;</i>)</a></code>
 
         </dt>
-        <dd><code><a href="https://dplyr.tidyverse.org/reference/cross_join.html" class="external-link">cross_join()</a></code>: native via <code>cudf::cross_join</code></dd>
+        <dd>Cross join for <code>tbl_gpu</code></dd>
 
         <dt>
 
@@ -200,7 +200,7 @@
           <code><a href="distinct.tbl_gpu.html">distinct(<i>&lt;tbl_gpu&gt;</i>)</a></code>
 
         </dt>
-        <dd>Keep only distinct/unique rows of a GPU table</dd>
+        <dd>Keep distinct rows</dd>
 
         <dt>
 
@@ -214,14 +214,14 @@
           <code><a href="filter.tbl_gpu.html">filter(<i>&lt;tbl_gpu&gt;</i>)</a></code>
 
         </dt>
-        <dd>Filter rows of a GPU table</dd>
+        <dd>Keep rows that match a condition</dd>
 
         <dt>
 
           <code><a href="filter_out.tbl_gpu.html">filter_out(<i>&lt;tbl_gpu&gt;</i>)</a></code>
 
         </dt>
-        <dd>Drop rows of a GPU table where conditions are TRUE</dd>
+        <dd>Drop rows that match a condition</dd>
 
         <dt>
 
@@ -358,7 +358,7 @@
 
         <dt>
 
-          <code><a href="is_tbl_gpu.html">is_tbl_gpu()</a></code> <code><a href="is_tbl_gpu.html">is_gibble()</a></code>
+          <code><a href="is_tbl_gpu.html">is_tbl_gpu()</a></code>
 
         </dt>
         <dd>Test if an object is a GPU table</dd>
@@ -368,7 +368,7 @@
           <code><a href="mutate.tbl_gpu.html">mutate(<i>&lt;tbl_gpu&gt;</i>)</a></code>
 
         </dt>
-        <dd>Create or modify columns in a GPU table</dd>
+        <dd>Create, modify and delete columns</dd>
 
         <dt>
 
@@ -480,7 +480,7 @@
           <code><a href="semi-anti-joins.html">semi_join(<i>&lt;tbl_gpu&gt;</i>)</a></code> <code><a href="semi-anti-joins.html">anti_join(<i>&lt;tbl_gpu&gt;</i>)</a></code>
 
         </dt>
-        <dd><code><a href="https://dplyr.tidyverse.org/reference/filter-joins.html" class="external-link">semi_join()</a></code>/<code><a href="https://dplyr.tidyverse.org/reference/filter-joins.html" class="external-link">anti_join()</a></code>: native via <code>cudf::filtered_join</code></dd>
+        <dd>Filtering joins for <code>tbl_gpu</code> (<code><a href="https://dplyr.tidyverse.org/reference/filter-joins.html" class="external-link">semi_join()</a></code>, <code><a href="https://dplyr.tidyverse.org/reference/filter-joins.html" class="external-link">anti_join()</a></code>)</dd>
 
         <dt>
 
@@ -501,7 +501,7 @@
           <code><a href="show_query.tbl_gpu.html">show_query(<i>&lt;tbl_gpu&gt;</i>)</a></code>
 
         </dt>
-        <dd>Show pending operations for a lazy tbl_gpu</dd>
+        <dd>Show the plan of a lazy tbl_gpu</dd>
 
         <dt>
 
@@ -557,7 +557,7 @@
           <code><a href="summarise.tbl_gpu.html">summarise(<i>&lt;tbl_gpu&gt;</i>)</a></code> <code><a href="summarise.tbl_gpu.html">summarize(<i>&lt;tbl_gpu&gt;</i>)</a></code>
 
         </dt>
-        <dd>Summarise groups in a GPU table</dd>
+        <dd>Summarise each group down to one row</dd>
 
         <dt>
 
@@ -589,10 +589,10 @@
 
         <dt>
 
-          <code><a href="tbl_gpu.html">tbl_gpu()</a></code> <code><a href="tbl_gpu.html">gibble()</a></code>
+          <code><a href="tbl_gpu.html">tbl_gpu()</a></code>
 
         </dt>
-        <dd>Create a GPU-backed data frame</dd>
+        <dd>Create a GPU table: a data frame in GPU memory</dd>
 
         <dt>
 

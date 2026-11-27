@@ -24,7 +24,7 @@
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -117,8 +117,9 @@ table, or set <code>options(cuplyr.exec_mode = "eager")</code> or
 (see <code><a href="../reference/cuplyr-options.html">?"cuplyr-options"</a></code>). Printing a lazy table runs the
 plan to show its first rows and keeps nothing, so it costs about as much
 as a <code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collect()</a></code>.</p>
-<p><code><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">show_query()</a></code> prints the pending steps of a lazy table.
-<code><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain()</a></code> also prints the plan the optimizer will run.</p>
+<p><code><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain()</a></code> prints the plan of a lazy table as R code: the
+plan the optimizer will run. <code>show_query(optimized = FALSE)</code>
+prints the steps as you wrote them.</p>
 <div class="sourceCode" id="cb2"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">lazy</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="va">mtcars</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">mpg</span> <span class="op">&gt;</span> <span class="fl">20</span><span class="op">)</span> <span class="op">|&gt;</span></span>
@@ -126,30 +127,22 @@ as a <code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="e
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select</a></span><span class="op">(</span><span class="va">cyl</span>, <span class="va">kpl</span><span class="op">)</span></span>
 <span></span>
 <span><span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="va">lazy</span><span class="op">)</span></span>
-<span><span class="co">#&gt; Pending operations:</span></span>
-<span><span class="co">#&gt; ast_select [2 cols]</span></span>
-<span><span class="co">#&gt; | ast_mutate [2 expressions]</span></span>
-<span><span class="co">#&gt; | | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | | ast_source [11 cols]</span></span>
-<span><span class="co">#&gt;</span></span>
-<span><span class="co">#&gt; AST depth: 4</span></span>
-<span><span class="co">#&gt; Node count: 4</span></span>
-<span><span class="co">#&gt;</span></span>
-<span><span class="co">#&gt; Optimized plan:</span></span>
-<span><span class="co">#&gt; ast_select [2 cols]</span></span>
-<span><span class="co">#&gt; | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | | ast_select [2 cols]</span></span>
-<span><span class="co">#&gt; | | | | ast_source [11 cols]</span></span></code></pre></div>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: 2 of 11 (mpg, cyl)</span></span>
+<span><span class="co">#&gt; filter(mpg &gt; 20)</span></span>
+<span><span class="co">#&gt; mutate(kpl = mpg * 0.425)</span></span>
+<span><span class="co">#&gt; select(cyl, kpl)</span></span></code></pre></div>
 <p>In the optimized plan the mutate has one expression instead of two,
-because nothing uses <code>hp2</code>. A new select right above the
-source keeps only the 2 columns the filter and the mutate read. Nothing
-has run on the GPU yet. <code>collect(lazy)</code> runs the plan.</p>
+because nothing uses <code>hp2</code>, and the source line shows that
+the plan reads only 2 of the 11 columns: <code>mpg</code> for the filter
+and the mutate, <code>cyl</code> for the select. Nothing has run on the
+GPU yet. <code>collect(lazy)</code> runs the plan.</p>
 <p><code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">compute()</a></code> and <code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collect()</a></code> run six optimizer
 passes.</p>
 <ul>
-<li>Projection pruning adds a select that keeps only the columns later
-steps need. This is the inner select above.</li>
+<li>Projection pruning keeps only the columns later steps need. This is
+the <code>columns read: 2 of 11</code> line above.</li>
 <li>Mutate fusion merges consecutive <code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code> calls into
 one step, keeping the order you wrote. It skips the merge if the result
 would have more than 8 expressions, or if the later
@@ -184,9 +177,9 @@ passes run on each side of them but not across.</p>
 <p>The tables below are static. Nothing is timed when this vignette
 builds. The code is at the end.</p>
 <ul>
-<li>Date and version: 2026-10-26, cuplyr 0.1.1.9000, at the version from
-the NEWS entry “Faster eager verb calls”. Some figures from earlier
-versions are quoted for comparison.</li>
+<li>Date and version: 2026-10-26, cuplyr 0.1.1.9000 (a development
+version before 0.2.0). Some figures from earlier versions are quoted for
+comparison.</li>
 <li>Hardware and software: NVIDIA GeForce RTX 5070 (12 GB), driver
 615.78.08, R 4.6.1, dplyr 1.2.1, the default <code>async</code> memory
 resource.</li>
@@ -391,8 +384,8 @@ longer batches (0.15 s each, 11 interleaved samples, three fresh
 processes) lazy took 1.75 to 1.76 ms against 1.87 to 1.88 at 1e3 rows,
 and 1.95 to 1.98 ms against 2.05 to 2.08 at 1e6, 4 to 6% less. At 1e7
 rows lazy is 0.67 ms behind (5.00 against 4.33 ms, 15%) and at 5e7 rows
-1.0 ms behind (18.5 against 17.5 ms, 6%). Before the NEWS entry “Faster
-lazy verb calls” those two gaps were 1.2 and 1.5 ms.</li>
+1.0 ms behind (18.5 against 17.5 ms, 6%). Earlier in the 0.2.0
+development cycle those two gaps were 1.2 and 1.5 ms.</li>
 <li>At 1e3 rows, in two profiling runs, recording the five-verb lazy
 plan took 1.0 ms, all of it in R. <code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collect()</a></code> took 0.66 ms:
 0.04 ms to optimize, 0.43 ms to lower and run, 0.09 ms to copy the

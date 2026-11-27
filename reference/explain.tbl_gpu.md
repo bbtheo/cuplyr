@@ -2,17 +2,16 @@
 
 `tbl_gpu` method for dplyr's
 [`dplyr::explain()`](https://dplyr.tidyverse.org/reference/explain.html)
-generic. Prints
-[`show_query()`](https://dplyr.tidyverse.org/reference/explain.html)'s
-output and, when operations are pending, the optimized plan
-[`compute()`](https://dplyr.tidyverse.org/reference/compute.html) would
-run. Nothing is executed.
+generic. cuplyr has no query language apart from the plan, so it prints
+the same text as
+[`show_query()`](https://dplyr.tidyverse.org/reference/explain.html);
+see there for the format. Nothing is executed.
 
 ## Usage
 
 ``` r
 # S3 method for class 'tbl_gpu'
-explain(x, ...)
+explain(x, ..., optimized = TRUE)
 ```
 
 ## Arguments
@@ -23,7 +22,12 @@ explain(x, ...)
 
 - ...:
 
-  Not used.
+  Must be empty.
+
+- optimized:
+
+  `TRUE` (the default) prints the plan the optimizer will run, `FALSE`
+  the plan as written.
 
 ## Value
 

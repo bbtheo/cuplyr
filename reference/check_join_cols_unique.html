@@ -5,17 +5,17 @@ column may appear in several non-equi conditions
 an equi and a non-equi condition. dplyr raises a plain rlang_error; x is
 checked before y. Runs on the raw by at the verb call (before routing to
 the fallback), so eager, lazy and fallback joins all fail the same way.
-Also raises dplyr's keep = FALSE + non-equi error first, and stops after
-x's duplicate check when x lacks a join column, so that error (raised later
-by the join) precedes y's duplicates, as in dplyr's join_cols()."><meta property="og:description" content="Per side, equi columns plus the UNIQUE non-equi columns must not repeat: a
+Also raises dplyr's keep = FALSE + non-equi error first, and, per side after
+its duplicates, dplyr's &quot;Join columns in x must be present in the data.&quot; (so
+x's missing column precedes y's duplicates, as in dplyr's join_cols())."><meta property="og:description" content="Per side, equi columns plus the UNIQUE non-equi columns must not repeat: a
 column may appear in several non-equi conditions
 (join_by(a &amp;gt;= lo, a &amp;lt;= hi)) but not twice among the equi ones, nor in both
 an equi and a non-equi condition. dplyr raises a plain rlang_error; x is
 checked before y. Runs on the raw by at the verb call (before routing to
 the fallback), so eager, lazy and fallback joins all fail the same way.
-Also raises dplyr's keep = FALSE + non-equi error first, and stops after
-x's duplicate check when x lacks a join column, so that error (raised later
-by the join) precedes y's duplicates, as in dplyr's join_cols()."><meta property="og:image" content="https://bbtheo.github.io/cuplyr/logo.png"></head><body>
+Also raises dplyr's keep = FALSE + non-equi error first, and, per side after
+its duplicates, dplyr's &quot;Join columns in x must be present in the data.&quot; (so
+x's missing column precedes y's duplicates, as in dplyr's join_cols())."><meta property="og:image" content="https://bbtheo.github.io/cuplyr/logo.png"></head><body>
     <a href="#main" class="visually-hidden-focusable">Skip to contents</a>
 
 
@@ -23,7 +23,7 @@ by the join) precedes y's duplicates, as in dplyr's join_cols()."><meta property
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -63,14 +63,20 @@ column may appear in several non-equi conditions
 an equi and a non-equi condition. dplyr raises a plain <code>rlang_error</code>; x is
 checked before y. Runs on the raw <code>by</code> at the verb call (before routing to
 the fallback), so eager, lazy and fallback joins all fail the same way.
-Also raises dplyr's <code>keep = FALSE</code> + non-equi error first, and stops after
-x's duplicate check when x lacks a join column, so that error (raised later
-by the join) precedes y's duplicates, as in dplyr's <code>join_cols()</code>.</p>
+Also raises dplyr's <code>keep = FALSE</code> + non-equi error first, and, per side after
+its duplicates, dplyr's "Join columns in <code>x</code> must be present in the data." (so
+x's missing column precedes y's duplicates, as in dplyr's <code>join_cols()</code>).</p>
     </div>
 
     <div class="section level2">
     <h2 id="ref-usage">Usage<a class="anchor" aria-label="anchor" href="#ref-usage"></a></h2>
-    <div class="sourceCode"><pre class="sourceCode r"><code><span><span class="fu">check_join_cols_unique</span><span class="op">(</span><span class="va">by</span>, <span class="va">x</span>, keep <span class="op">=</span> <span class="cn">NULL</span>, call <span class="op">=</span> <span class="fu">rlang</span><span class="fu">::</span><span class="fu"><a href="https://rlang.r-lib.org/reference/stack.html" class="external-link">caller_env</a></span><span class="op">(</span><span class="op">)</span><span class="op">)</span></span></code></pre></div>
+    <div class="sourceCode"><pre class="sourceCode r"><code><span><span class="fu">check_join_cols_unique</span><span class="op">(</span></span>
+<span>  <span class="va">by</span>,</span>
+<span>  <span class="va">x</span>,</span>
+<span>  keep <span class="op">=</span> <span class="cn">NULL</span>,</span>
+<span>  call <span class="op">=</span> <span class="fu">rlang</span><span class="fu">::</span><span class="fu"><a href="https://rlang.r-lib.org/reference/stack.html" class="external-link">caller_env</a></span><span class="op">(</span><span class="op">)</span>,</span>
+<span>  y <span class="op">=</span> <span class="cn">NULL</span></span>
+<span><span class="op">)</span></span></code></pre></div>
     </div>
 
     <div class="section level2">
@@ -91,6 +97,10 @@ by the join) precedes y's duplicates, as in dplyr's <code>join_cols()</code>.</p
 
 <dt id="arg-call">call<a class="anchor" aria-label="anchor" href="#arg-call"></a></dt>
 <dd><p>The verb's frame, reported as the error call</p></dd>
+
+
+<dt id="arg-y">y<a class="anchor" aria-label="anchor" href="#arg-y"></a></dt>
+<dd><p>The right table, or <code>NULL</code> to leave its columns unchecked</p></dd>
 
 </dl></div>
 

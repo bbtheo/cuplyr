@@ -7,7 +7,7 @@
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -67,8 +67,8 @@
 
 <dt id="arg-source-levels">source_levels<a class="anchor" aria-label="anchor" href="#arg-source-levels"></a></dt>
 <dd><p>For a <code>DICTIONARY32</code> source column being cast to
-<code>STRING</code> (dplyr's factor + character -&gt; character contract, Bug 3 of
-Phase 11 L2): this column's OWN level vector, decoded via
+<code>STRING</code> (dplyr's factor + character -&gt; character contract): this
+column's OWN level vector, decoded via
 <code>gpu_decode_factor()</code> instead of <code>gpu_cast_to_string()</code>'s numeric-only
 path (which only ever sees the PHYSICAL INT32 column and would
 silently emit its raw codes as strings, e.g. <code>"2"</code> instead of <code>"m"</code>).

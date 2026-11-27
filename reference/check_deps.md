@@ -39,12 +39,25 @@ Invisibly returns a list with:
 The following checks are performed:
 
 1.  **NVIDIA Driver**: Verifies `nvidia-smi` is available and reports
-    driver version
+    the driver version, read with
+    `nvidia-smi --query-gpu=driver_version` and, failing that, from the
+    `Driver Version:` or `KMD Version:` header
 
-2.  **CUDA Toolkit**: Checks for `nvcc`, validates CUDA \>= 12.2, and
-    reports CUDA version
+2.  **CUDA Toolkit**: Looks for `nvcc` in `CUDA_HOME`, `CONDA_PREFIX`,
+    the environment of the libcudf that cuplyr has loaded, the pixi
+    environment (`PIXI_PROJECT_ROOT`, or `.pixi` in the working
+    directory), the system CUDA directories and `PATH`, in that order.
+    Validates CUDA \>= 12.2 and reports the CUDA version
 
-3.  **libcudf**: Looks for cudf headers in standard paths
+3.  **libcudf**: Reports the libcudf that cuplyr has loaded, if any.
+    Otherwise looks for cudf headers and `libcudf.so` under `CUDF_HOME`,
+    `CONDA_PREFIX`, the pixi environment (`PIXI_PROJECT_ROOT`, or
+    `.pixi` in the working directory) and standard paths. A `CUDF_HOME`
+    or `CONDA_PREFIX` that points to a missing directory is named in the
+    message but does not fail the check by itself. The check reports the
+    libcudf version it finds (from `cudf/version_config.hpp`) and fails
+    for a libcudf older than 26.02; a version it can't read is not a
+    failure.
 
 4.  **R Version**: Checks R \>= 4.3.0
 
@@ -67,9 +80,9 @@ for full system diagnostics
 check_deps()
 #> cuplyr dependency check
 #> -------------------------------------------------- 
-#> ✔ NVIDIA Driver: nvidia-smi found (version unknown)
+#> ✔ NVIDIA Driver: Driver version 615.78.08
 #> ✔ CUDA Toolkit: CUDA 13.4 at /opt/cuda
-#> ✔ libcudf: Found headers and libcudf.so at /home/theo/cuplr/.pixi/envs/default
+#> ✔ libcudf: libcudf loaded by cuplyr from /home/theo/cuplr/.pixi/envs/default/lib/libcudf.so (libcudf 26.10.2). Note: CUDF_HOME is set to '/home/theo/cuplr/rapids-dev/lib/python3.12/site-packages/libcudf', which does not exist.
 #> ✔ R Version: R 4.6.1
 #> ✔ R Packages: All 7 required packages installed
 #> ✔ GPU Access: GPU accessible: NVIDIA GeForce RTX 5070
@@ -82,9 +95,9 @@ check_deps(format = "json")
 #> {
 #>   "ok": true,
 #>   "checks": {
-#>     "nvidia_driver": {"ok": true, "value": null, "message": "nvidia-smi found (version unknown)"},
+#>     "nvidia_driver": {"ok": true, "value": "615.78.08", "message": "Driver version 615.78.08"},
 #>     "cuda_toolkit": {"ok": true, "value": "13.4", "message": "CUDA 13.4 at /opt/cuda"},
-#>     "libcudf": {"ok": true, "value": "/home/theo/cuplr/.pixi/envs/default", "message": "Found headers and libcudf.so at /home/theo/cuplr/.pixi/envs/default"},
+#>     "libcudf": {"ok": true, "value": "/home/theo/cuplr/.pixi/envs/default", "message": "libcudf loaded by cuplyr from /home/theo/cuplr/.pixi/envs/default/lib/libcudf.so (libcudf 26.10.2). Note: CUDF_HOME is set to '/home/theo/cuplr/rapids-dev/lib/python3.12/site-packages/libcudf', which does not exist."},
 #>     "r_version": {"ok": true, "value": "4.6.1", "message": "R 4.6.1"},
 #>     "r_packages": {"ok": true, "value": "Rcpp, dplyr, rlang, vctrs, cli, tidyselect, tibble", "message": "All 7 required packages installed"},
 #>     "gpu_access": {"ok": true, "value": "NVIDIA GeForce RTX 5070", "message": "GPU accessible: NVIDIA GeForce RTX 5070"}
@@ -95,9 +108,9 @@ check_deps(format = "json")
 result <- check_deps()
 #> cuplyr dependency check
 #> -------------------------------------------------- 
-#> ✔ NVIDIA Driver: nvidia-smi found (version unknown)
+#> ✔ NVIDIA Driver: Driver version 615.78.08
 #> ✔ CUDA Toolkit: CUDA 13.4 at /opt/cuda
-#> ✔ libcudf: Found headers and libcudf.so at /home/theo/cuplr/.pixi/envs/default
+#> ✔ libcudf: libcudf loaded by cuplyr from /home/theo/cuplr/.pixi/envs/default/lib/libcudf.so (libcudf 26.10.2). Note: CUDF_HOME is set to '/home/theo/cuplr/rapids-dev/lib/python3.12/site-packages/libcudf', which does not exist.
 #> ✔ R Version: R 4.6.1
 #> ✔ R Packages: All 7 required packages installed
 #> ✔ GPU Access: GPU accessible: NVIDIA GeForce RTX 5070

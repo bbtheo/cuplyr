@@ -1,13 +1,16 @@
-# GPU-native grouped/`by=` slice() family desugar (Phase 5, task W7)
+# Grouped/`by=` slice() family desugar on the GPU
 
-Implements every
+Implements a
 [`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html)-grouped
 or `by=`/`.by=` on-the-fly-grouped
 [`slice()`](https://dplyr.tidyverse.org/reference/slice.html)/[`slice_head()`](https://dplyr.tidyverse.org/reference/slice.html)/[`slice_tail()`](https://dplyr.tidyverse.org/reference/slice.html)/[`slice_min()`](https://dplyr.tidyverse.org/reference/slice.html)/[`slice_max()`](https://dplyr.tidyverse.org/reference/slice.html)
 call by composing the existing window/mutate/filter/arrange/select AST
-machinery (Phase 5 W1-W6) – ZERO new GPU primitives. See this file's
-module docs for the empirically-verified semantics this reproduces
-(group order, NA handling, `by=`'s first-appearance rule).
+machinery, with no GPU primitive of its own. (Grouped
+[`slice_min()`](https://dplyr.tidyverse.org/reference/slice.html)/
+[`slice_max()`](https://dplyr.tidyverse.org/reference/slice.html) on a
+key in `topk_key_types` takes `slice_rank_grouped()` instead.) It
+reproduces dplyr's group order, NA handling and `by=`'s first-appearance
+rule (see the comment at the top of the file).
 
 ## Usage
 
@@ -86,8 +89,9 @@ The node sequence, in order (only the parts relevant to `mode`/
     the computed `order_by` expression under a temp name.
 
 2.  (`mode == "rank"`) `ast_mutate`: `..slice_na.. = is.na(order_col)` –
-    the NA-last sort key `order_by` needs (see module docs on why a
-    plain `desc(order_col)` arrange can't be used here).
+    an NA-last sort key for `order_by` (redundant for the order, since
+    `gpu_arrange()` already sorts NA last in both directions, but still
+    needed to build `..slice_valid..`/`..slice_nn..` below).
 
 3.  (`group_mode == "by"`) `ast_window` (UNGROUPED):
     `..slice_rowid.. = row_number()` over the whole table, then
@@ -118,8 +122,8 @@ The node sequence, in order (only the parts relevant to `mode`/
     ungrouped path, expressed as IR (`gs` is a real per-group column
     here, not a compile-time scalar).
 
-8.  `ast_filter`: the mode-specific predicate (see module docs' desugar
-    table).
+8.  `ast_filter`: the mode-specific predicate over the temp columns
+    above.
 
 9.  `ast_select`: back down to the ORIGINAL column set (captured before
     any of the above), dropping every `..slice_*..`/computed- `order_by`

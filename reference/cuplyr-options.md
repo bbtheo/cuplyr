@@ -19,7 +19,7 @@ cuplyr_options(internal = FALSE)
 - internal:
 
   Also list the internal switches (`cuplyr.roll_path`,
-  `cuplyr.check_schema_cache`).
+  `cuplyr.topk_path`, `cuplyr.check_schema_cache`).
 
 ## Value
 
@@ -63,6 +63,10 @@ it shows the same table.
   async resource keeps before returning memory to the driver, 0 or more.
   Unset (the default): no automatic release.
 
+- `cuplyr.parquet_pushdown`: `TRUE` (the default) or `FALSE`. `FALSE`
+  reads Parquet files without projection and predicate pushdown. See
+  [`read_parquet_gpu()`](https://bbtheo.github.io/cuplyr/reference/read_parquet_gpu.md).
+
 - `cuplyr.roll_median` (`CUPLYR_ROLL_MEDIAN`): `"exact"` (the default)
   or `"frollmedian"`, the engine of
   [`roll_median()`](https://bbtheo.github.io/cuplyr/reference/roll.md).
@@ -76,6 +80,12 @@ Listed by `cuplyr_options(internal = TRUE)`; not for normal use.
 
 - `cuplyr.roll_path` (`CUPLYR_ROLL_PATH`): `"auto"` (the default),
   `"scans"` or `"cudf"`; forces the path of rolling-window functions.
+
+- `cuplyr.topk_path`: `"auto"` (the default), `"topk"` or `"sort"`;
+  forces the route of
+  [`slice_min()`](https://dplyr.tidyverse.org/reference/slice.html) and
+  [`slice_max()`](https://dplyr.tidyverse.org/reference/slice.html) (a
+  top-k selection or a full sort).
 
 - `cuplyr.check_schema_cache` (`CUPLYR_CHECK_SCHEMA_CACHE`): `TRUE` or
   `FALSE` (the default); checks the cached schema of every lazy table on
@@ -131,6 +141,8 @@ cuplyr_options()
 #>     Initial pool size in bytes (default: a quarter of free GPU memory, at most 1 GiB). Read at load.
 #> cuplyr.release_threshold = <unset>  (default, CUPLYR_RELEASE_THRESHOLD)
 #>     Bytes the async resource keeps before returning memory to the driver (unset: never). Read at load.
+#> cuplyr.parquet_pushdown = TRUE  (default)
+#>     Set FALSE to read Parquet files without projection and predicate pushdown.
 #> cuplyr.roll_median = exact  (default, CUPLYR_ROLL_MEDIAN)
 #>     Engine of roll_median(): exact (default) or frollmedian (data.table).
 

@@ -9,7 +9,7 @@ table. Data remains on the GPU (unlike collect() which transfers to R)."><meta p
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -71,7 +71,8 @@ table. Data remains on the GPU (unlike <code><a href="https://dplyr.tidyverse.or
 </dl></div>
     <div class="section level2">
     <h2 id="value">Value<a class="anchor" aria-label="anchor" href="#value"></a></h2>
-    <p>A <code>tbl_gpu</code> with all operations materialized and <code>lazy_ops</code> cleared.</p>
+    <p>A <code>tbl_gpu</code> whose pending steps have all run, holding the result in
+GPU memory. It keeps its execution mode, so a lazy table stays lazy.</p>
     </div>
     <div class="section level2">
     <h2 id="details">Details<a class="anchor" aria-label="anchor" href="#details"></a></h2>

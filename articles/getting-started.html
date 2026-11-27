@@ -24,7 +24,7 @@
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -89,7 +89,7 @@ The original data frame is not changed.</p>
 <div class="sourceCode" id="cb2"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">gpu_cars</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="va">mtcars</span><span class="op">)</span></span>
 <span><span class="va">gpu_cars</span></span>
-<span><span class="co">#&gt; <span style="color: #949494;"># A gibble: 32 × 11</span></span></span>
+<span><span class="co">#&gt; <span style="color: #949494;"># A tbl_gpu: 32 × 11</span></span></span>
 <span><span class="co">#&gt; $ mpg  &lt;dbl&gt; 21, 21, 22.8, 21.4, 18.7, 18.1, 14.3, 24.4, 22.8, 19.2</span></span>
 <span><span class="co">#&gt; $ cyl  &lt;dbl&gt; 6, 6, 4, 6, 8, 6, 8, 4, 4, 6</span></span>
 <span><span class="co">#&gt; $ disp &lt;dbl&gt; 160, 160, 108, 258, 360, 225, 360, 146.7, 140.8, 167.6</span></span>
@@ -218,22 +218,23 @@ by moving filters earlier and fusing steps.</p>
 <span><span class="co">#&gt; [1] TRUE</span></span>
 <span><span class="fu"><a href="../reference/has_pending_ops.html">has_pending_ops</a></span><span class="op">(</span><span class="va">pipeline</span><span class="op">)</span>  <span class="co"># TRUE</span></span>
 <span><span class="co">#&gt; [1] TRUE</span></span>
-<span><span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">show_query</a></span><span class="op">(</span><span class="va">pipeline</span><span class="op">)</span>       <span class="co"># the pending steps</span></span>
-<span><span class="co">#&gt; Pending operations:</span></span>
-<span><span class="co">#&gt; ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | | ast_source [11 cols]</span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; AST depth: 4 </span></span>
-<span><span class="co">#&gt; Node count: 4</span></span></code></pre></div>
+<span><span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">show_query</a></span><span class="op">(</span><span class="va">pipeline</span><span class="op">)</span>       <span class="co"># the plan, as R code</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 11</span></span>
+<span><span class="co">#&gt; filter(cyl == 4, mpg &gt; 20)</span></span>
+<span><span class="co">#&gt; mutate(x = hp * 2)</span></span></code></pre></div>
 <p>Errors such as a missing column or a type mismatch still appear at
 the verb that causes them, not at <code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collect()</a></code>:</p>
 <div class="sourceCode" id="cb6"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="kw"><a href="https://rdrr.io/r/base/try.html" class="external-link">try</a></span><span class="op">(</span><span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="va">mtcars</span><span class="op">)</span> <span class="op">|&gt;</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">nonexistent_column</span> <span class="op">&gt;</span> <span class="fl">5</span><span class="op">)</span><span class="op">)</span></span>
-<span><span class="co">#&gt; Error : object 'nonexistent_column' not found</span></span>
+<span><span class="co">#&gt; Error in filter(tbl_gpu(mtcars), nonexistent_column &gt; 5) : </span></span>
+<span><span class="co">#&gt;   <span style="color: #00BBBB;">ℹ</span> In argument: `nonexistent_column &gt;</span></span>
+<span><span class="co">#&gt;   5`.</span></span>
+<span><span class="co">#&gt; <span style="font-weight: bold;">Caused by error:</span></span></span>
+<span><span class="co">#&gt; <span style="color: #BBBB00;">!</span> object 'nonexistent_column' not found</span></span>
 <span><span class="kw"><a href="https://rdrr.io/r/base/try.html" class="external-link">try</a></span><span class="op">(</span><span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="va">mtcars</span><span class="op">)</span> <span class="op">|&gt;</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">mpg</span> <span class="op">&gt;</span> <span class="st">"not a number"</span><span class="op">)</span><span class="op">)</span></span>
-<span><span class="co">#&gt; <span style="color: #949494;"># A gibble: 0 × 11</span></span></span>
+<span><span class="co">#&gt; <span style="color: #949494;"># A tbl_gpu: 0 × 11</span></span></span>
 <span><span class="co">#&gt; $ mpg  &lt;dbl&gt; </span></span>
 <span><span class="co">#&gt; $ cyl  &lt;dbl&gt; </span></span>
 <span><span class="co">#&gt; $ disp &lt;dbl&gt; </span></span>
@@ -246,7 +247,7 @@ the verb that causes them, not at <code><a href="https://dplyr.tidyverse.org/ref
 <span><span class="co">#&gt; $ gear &lt;dbl&gt; </span></span>
 <span><span class="co">#&gt; $ carb &lt;dbl&gt;</span></span></code></pre></div>
 <p>Printing a lazy table runs the plan and shows the first rows under a
-<code># A gibble [lazy]:</code> header. It keeps no result, so printing
+<code># A tbl_gpu [lazy]:</code> header. It keeps no result, so printing
 twice runs the plan twice.</p>
 <p>In eager mode each verb runs right away, which helps when you step
 through a pipeline:</p>
@@ -288,22 +289,22 @@ to it. <code><a href="../reference/gpu_memory_state.html">gpu_memory_state()</a>
 <span><span class="co">#&gt; [1] TRUE</span></span>
 <span><span class="co">#&gt; </span></span>
 <span><span class="co">#&gt; $total_bytes</span></span>
-<span><span class="co">#&gt; [1] 12418416640</span></span>
+<span><span class="co">#&gt; [1] 12441747456</span></span>
 <span><span class="co">#&gt; </span></span>
 <span><span class="co">#&gt; $free_bytes</span></span>
-<span><span class="co">#&gt; [1] 11604656128</span></span>
+<span><span class="co">#&gt; [1] 11469848576</span></span>
 <span><span class="co">#&gt; </span></span>
 <span><span class="co">#&gt; $used_bytes</span></span>
-<span><span class="co">#&gt; [1] 813760512</span></span>
+<span><span class="co">#&gt; [1] 971898880</span></span>
 <span><span class="co">#&gt; </span></span>
 <span><span class="co">#&gt; $total_gb</span></span>
-<span><span class="co">#&gt; [1] 12.41842</span></span>
+<span><span class="co">#&gt; [1] 12.44175</span></span>
 <span><span class="co">#&gt; </span></span>
 <span><span class="co">#&gt; $free_gb</span></span>
-<span><span class="co">#&gt; [1] 11.60466</span></span>
+<span><span class="co">#&gt; [1] 11.46985</span></span>
 <span><span class="co">#&gt; </span></span>
 <span><span class="co">#&gt; $used_gb</span></span>
-<span><span class="co">#&gt; [1] 0.8137605</span></span>
+<span><span class="co">#&gt; [1] 0.9718989</span></span>
 <span><span class="co">#&gt; </span></span>
 <span><span class="co">#&gt; $resource</span></span>
 <span><span class="co">#&gt; [1] "async"</span></span>
@@ -342,12 +343,29 @@ memory is freed.</li>
 </ul>
 </div>
 <div class="section level2">
+<h2 id="installation">Installation<a class="anchor" aria-label="anchor" href="#installation"></a>
+</h2>
+<p>The conda package <code>r-cuplyr</code> on the <code>bbtheo</code>
+channel is a binary for RAPIDS 26.10 and CUDA 13. It needs an NVIDIA
+driver that supports CUDA 13, but no CUDA toolkit or compiler:</p>
+<div class="sourceCode" id="cb11"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb11-1"><a href="#cb11-1" tabindex="-1"></a><span class="ex">conda</span> install <span class="at">-c</span> bbtheo <span class="at">-c</span> rapidsai <span class="at">-c</span> conda-forge <span class="at">-c</span> nvidia r-cuplyr</span></code></pre></div>
+<p>With pixi, run <code>pixi add r-cuplyr</code> in a project with the
+same channels. To build from source, use the install script; the <a href="https://github.com/bbtheo/cuplyr#installation" class="external-link">README</a> has both
+routes. Then check the installation from R:</p>
+<div class="sourceCode" id="cb12"><pre class="downlit sourceCode r">
+<code class="sourceCode R"><span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">library</a></span><span class="op">(</span><span class="va"><a href="https://github.com/bbtheo/cuplyr" class="external-link">cuplyr</a></span><span class="op">)</span></span>
+<span><span class="fu"><a href="../reference/verify_installation.html">verify_installation</a></span><span class="op">(</span><span class="op">)</span>  <span class="co"># runs a small GPU round trip</span></span>
+<span><span class="fu"><a href="../reference/check_deps.html">check_deps</a></span><span class="op">(</span><span class="op">)</span>           <span class="co"># lists anything missing</span></span>
+<span><span class="fu"><a href="../reference/diagnostics.html">diagnostics</a></span><span class="op">(</span><span class="op">)</span>          <span class="co"># system details for a bug report</span></span></code></pre></div>
+</div>
+<div class="section level2">
 <h2 id="system-requirements">System requirements<a class="anchor" aria-label="anchor" href="#system-requirements"></a>
 </h2>
 <ul>
-<li>NVIDIA GPU with compute capability 7.0 or higher</li>
-<li>CUDA Toolkit 12.2 or later</li>
-<li>RAPIDS cuDF 25.12 or later</li>
+<li>NVIDIA GPU with compute capability 7.5 (Turing) or newer</li>
+<li>CUDA Toolkit 12.2 or later (RAPIDS 26.x is tested with CUDA 13,
+which the installers and pixi use)</li>
+<li>RAPIDS libcudf 26.02 or newer (developed and tested on 26.10)</li>
 <li>R 4.3.0 or later</li>
 </ul>
 </div>

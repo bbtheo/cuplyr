@@ -1,6 +1,6 @@
 # Raise dplyr's exact `multiple=`/`relationship=`/`unmatched=` conditions
 
-The Phase 7 J5 activation point: called from
+Called from
 [`lower_join()`](https://bbtheo.github.io/cuplyr/reference/lower_join.md)
 (R/lower.R) immediately after a mutating join
 (`left`/`inner`/`full`/`right`) returns its `list(ptr, diag)` result,

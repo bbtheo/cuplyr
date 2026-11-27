@@ -7,7 +7,7 @@
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -79,8 +79,7 @@ median, quantile, n_distinct, first, last, nth, any, all)</p></dd>
 
 
 <dt id="arg-na-rm">na_rm<a class="anchor" aria-label="anchor" href="#arg-na-rm"></a></dt>
-<dd><p>Logical scalar (Phase 6, task 6.1; extended Phase 6, task
-6.2). <code>FALSE</code> (the default, matching R's own <code>na.rm = FALSE</code> default
+<dd><p>Logical scalar. <code>FALSE</code> (the default, matching R's own <code>na.rm = FALSE</code> default
 for <code><a href="https://rdrr.io/r/base/mean.html" class="external-link">mean()</a></code>/<code><a href="https://rdrr.io/r/base/sum.html" class="external-link">sum()</a></code>/<code><a href="https://rdrr.io/r/base/Extremes.html" class="external-link">min()</a></code>/<code><a href="https://rdrr.io/r/base/Extremes.html" class="external-link">max()</a></code>/<code><a href="https://rdrr.io/r/stats/sd.html" class="external-link">sd()</a></code>/<code><a href="https://rdrr.io/r/stats/cor.html" class="external-link">var()</a></code>/<code><a href="https://rdrr.io/r/stats/median.html" class="external-link">median()</a></code>) means a
 group with ANY null input value must produce a NULL aggregation result
 for the WHOLE group – cudf's own groupby MEAN/SUM/MIN/MAX/STD/
@@ -88,7 +87,7 @@ VARIANCE/MEDIAN aggregations always exclude nulls, so
 <code>gpu_summarise()</code> (<code>src/ops_groupby.cpp</code>) applies an extra
 whole-group-null propagation step when this is <code>FALSE</code> and the input
 column actually has nulls (same technique as the window-aggregate
-path, <code>src/ops_window.cpp</code>, W4). <code>TRUE</code> means "use cudf's native
+path, <code>src/ops_window.cpp</code>). <code>TRUE</code> means "use cudf's native
 null-excluding behavior as-is" – no extra step. Meaningless for <code><a href="https://dplyr.tidyverse.org/reference/context.html" class="external-link">n()</a></code>
 (counts rows regardless of nulls, matching dplyr already). For
 <code><a href="https://rdrr.io/r/stats/quantile.html" class="external-link">quantile()</a></code>, <code>na_rm = FALSE</code> with an actual null present is a hard
@@ -112,14 +111,15 @@ scalar parameter beyond the input column: <code><a href="https://rdrr.io/r/stats
 
 
 <dt id="arg-identity">identity<a class="anchor" aria-label="anchor" href="#arg-identity"></a></dt>
-<dd><p>Logical scalar (F07). <code>TRUE</code> (the default) lets a
+<dd><p>Logical scalar. <code>TRUE</code> (the default) lets a
 <code><a href="https://rdrr.io/r/base/Extremes.html" class="external-link">min()</a></code>/<code><a href="https://rdrr.io/r/base/Extremes.html" class="external-link">max()</a></code> over an INT32/FLOAT64 column apply base R's empty-vector
 identity (<code>Inf</code>/<code>-Inf</code>, with dplyr's warning) for an empty group, which
 promotes an INT32 result column to FLOAT64 when it happens; see
-<code>gpu_summarise()</code> (<code>src/ops_groupby.cpp</code>). <code>FALSE</code> is for internal helper
-aggregations (<code>summarise_by_desugar()</code>'s row-position <code><a href="https://rdrr.io/r/base/Extremes.html" class="external-link">min()</a></code>) that must
-stay INT32 and never warn. Only meaningful for <code>min</code>/<code>max</code> over
-INT32/FLOAT64; stored as <code>FALSE</code> for everything else.</p></dd>
+<code>gpu_summarise()</code> (<code>src/ops_groupby.cpp</code>). A STRING or Date/POSIXct one
+keeps its null value but is counted the same way, for dplyr's
+warning. <code>FALSE</code> would keep the result INT32 and never warn, but nothing
+calls it with <code>FALSE</code> today. Only meaningful for <code>min</code>/<code>max</code> over
+INT32/FLOAT64/STRING/timestamps; stored as <code>FALSE</code> for everything else.</p></dd>
 
 </dl></div>
     <div class="section level2">

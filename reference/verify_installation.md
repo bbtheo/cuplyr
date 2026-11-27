@@ -31,6 +31,11 @@ Invisibly returns a list with:
 
   Character: GPU model name, or `NA`
 
+- libcudf_version:
+
+  Character: the libcudf version cuplyr was built against (such as
+  `"26.10.2"`), or `NA` when it is unknown
+
 - roundtrip_ok:
 
   Logical: data round-trip succeeded
@@ -41,16 +46,19 @@ Invisibly returns a list with:
 
 ## Details
 
-This function runs three checks in sequence:
+This function runs four checks in sequence:
 
 1.  **Package load**:
     [`library(cuplyr)`](https://github.com/bbtheo/cuplyr) succeeds
 
-2.  **GPU detection**:
+2.  **libcudf version**: the libcudf cuplyr was built against is 26.02
+    or newer (an unknown version passes)
+
+3.  **GPU detection**:
     [`gpu_details()`](https://bbtheo.github.io/cuplyr/reference/gpu_details.md)
     shows an available GPU
 
-3.  **Round-trip**: `tbl_gpu(mtcars) |> filter(mpg > 20) |> collect()`
+4.  **Round-trip**: `tbl_gpu(mtcars) |> filter(mpg > 20) |> collect()`
     returns correct results
 
 ## See also

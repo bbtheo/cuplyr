@@ -2,13 +2,10 @@
 
 Moves columns of a GPU table to a new position, similar to
 [`dplyr::relocate()`](https://dplyr.tidyverse.org/reference/relocate.html).
-The reorder itself runs via
-[`ast_select()`](https://bbtheo.github.io/cuplyr/reference/ast_select.md)
-(schema
-
-- a `gpu_select()` gather, no new C++ binding needed); a rename
-  (`relocate(df, a = x)`) is schema-only, like
-  [`rename.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/rename.tbl_gpu.md).
+The reorder runs on the GPU as a column selection, like
+[`select.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/select.tbl_gpu.md);
+a rename (`relocate(df, a = x)`) only changes the column names, like
+[`rename.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/rename.tbl_gpu.md).
 
 ## Usage
 

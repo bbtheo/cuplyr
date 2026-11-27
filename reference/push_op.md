@@ -1,11 +1,11 @@
 # Apply an AST node to a tbl_gpu, dispatching on exec_mode
 
-The only exec_mode branch point (D1). Lazy mode stores `node` as the new
+The only exec_mode branch point. Lazy mode stores `node` as the new
 `$lazy_ops` and does no GPU work; eager mode lowers and executes `node`
 immediately. Both modes uniformly compute `schema` from `input_schema`
 alone (via
 [`infer_schema_from()`](https://bbtheo.github.io/cuplyr/reference/infer_schema_from.md),
-with factor_levels reattached per D3) and `groups` (via
+with factor_levels reattached) and `groups` (via
 [`propagate_groups()`](https://bbtheo.github.io/cuplyr/reference/propagate_groups.md)).
 
 ## Usage

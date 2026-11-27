@@ -17,6 +17,6 @@ ir_parse_replace_values(expr, env, schema)
 
 ## Details
 
-Only the two-sided-formula clause interface is implemented this wave:
-`from=`/`to=` (the vector-lookup-table interface) being present at all
-makes this return `NULL` (fall back).
+Only the two-sided-formula clause interface is supported: `from=`/`to=`
+(the vector-lookup-table interface) being present at all makes this
+return `NULL` (fall back).

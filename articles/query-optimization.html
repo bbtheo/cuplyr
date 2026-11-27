@@ -24,7 +24,7 @@
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -73,9 +73,9 @@
     
     
 <p>cuplyr tables are lazy by default. A verb on a lazy table doesn’t
-run. It adds a node to a tree, the AST, that describes the query. When
-<code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">compute()</a></code> or <code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collect()</a></code> runs the tree, an
-optimizer first rewrites it into a plan that gives the same result. An
+run. It adds a step to a plan that describes the query. When
+<code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">compute()</a></code> or <code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collect()</a></code> runs the plan, an
+optimizer first rewrites it into one that gives the same result. An
 eager table, <code>tbl_gpu(df, lazy = FALSE)</code>, runs each verb at
 once, so the optimizer never sees it.</p>
 <p>This article shows what the optimizer does. It doesn’t time anything.
@@ -83,20 +83,17 @@ For timings, see
 <code><a href="../articles/performance.html">vignette("performance", package = "cuplyr")</a></code>.</p>
 <div class="sourceCode" id="cb1"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">library</a></span><span class="op">(</span><span class="va"><a href="https://github.com/bbtheo/cuplyr" class="external-link">cuplyr</a></span><span class="op">)</span></span>
-<span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">library</a></span><span class="op">(</span><span class="va"><a href="https://dplyr.tidyverse.org" class="external-link">dplyr</a></span><span class="op">)</span></span>
-<span></span>
-<span><span class="co"># Prints only the optimized plan of explain(), to keep the output short</span></span>
-<span><span class="va">optimized</span> <span class="op">&lt;-</span> <span class="kw">function</span><span class="op">(</span><span class="va">x</span><span class="op">)</span> <span class="op">{</span></span>
-<span>  <span class="va">out</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/utils/capture.output.html" class="external-link">capture.output</a></span><span class="op">(</span><span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="va">x</span><span class="op">)</span><span class="op">)</span></span>
-<span>  <span class="fu"><a href="https://rdrr.io/r/base/cat.html" class="external-link">cat</a></span><span class="op">(</span><span class="va">out</span><span class="op">[</span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/grep.html" class="external-link">grep</a></span><span class="op">(</span><span class="st">"^Optimized plan"</span>, <span class="va">out</span><span class="op">)</span> <span class="op">+</span> <span class="fl">1</span><span class="op">)</span><span class="op">:</span><span class="fu"><a href="https://rdrr.io/r/base/length.html" class="external-link">length</a></span><span class="op">(</span><span class="va">out</span><span class="op">)</span><span class="op">]</span>, sep <span class="op">=</span> <span class="st">"\n"</span><span class="op">)</span></span>
-<span><span class="op">}</span></span></code></pre></div>
+<span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">library</a></span><span class="op">(</span><span class="va"><a href="https://dplyr.tidyverse.org" class="external-link">dplyr</a></span><span class="op">)</span></span></code></pre></div>
 <div class="section level2">
-<h2 id="reading-the-tree">Reading the tree<a class="anchor" aria-label="anchor" href="#reading-the-tree"></a>
+<h2 id="reading-the-plan">Reading the plan<a class="anchor" aria-label="anchor" href="#reading-the-plan"></a>
 </h2>
-<p><code><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">show_query()</a></code> prints the pending tree, one <code>|</code>
-per level, with the <code>source</code> node at the bottom and the last
-verb at the top. <code><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain()</a></code> prints the same tree and then
-the optimized plan. Neither runs anything.</p>
+<p><code><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">show_query()</a></code> and <code><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain()</a></code> print the plan
+as R code, in the order you wrote it: the source first, then one line
+per step, each step the dplyr call it stands for. Neither runs anything.
+<code>explain(x)</code> prints the plan the optimizer will run.
+<code>show_query(x, optimized = FALSE)</code> prints the plan as you
+wrote it. <code>show_query(x)</code> prints the same text as
+<code>explain(x)</code>.</p>
 <div class="sourceCode" id="cb2"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">pipeline</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="va">mtcars</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">mpg</span> <span class="op">&gt;</span> <span class="fl">20</span><span class="op">)</span> <span class="op">|&gt;</span></span>
@@ -104,81 +101,95 @@ the optimized plan. Neither runs anything.</p>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select</a></span><span class="op">(</span><span class="va">mpg</span>, <span class="va">cyl</span>, <span class="va">power_ratio</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/arrange.html" class="external-link">arrange</a></span><span class="op">(</span><span class="fu"><a href="https://dplyr.tidyverse.org/reference/desc.html" class="external-link">desc</a></span><span class="op">(</span><span class="va">mpg</span><span class="op">)</span><span class="op">)</span></span>
 <span></span>
-<span><span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">show_query</a></span><span class="op">(</span><span class="va">pipeline</span><span class="op">)</span></span>
-<span><span class="co">#&gt; Pending operations:</span></span>
-<span><span class="co">#&gt; ast_arrange [1 keys]</span></span>
-<span><span class="co">#&gt; | ast_select [3 cols]</span></span>
-<span><span class="co">#&gt; | | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | | | ast_source [11 cols]</span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; AST depth: 5 </span></span>
-<span><span class="co">#&gt; Node count: 5</span></span></code></pre></div>
-<p>Most verbs add one node of the same name. The exceptions:</p>
+<span><span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">show_query</a></span><span class="op">(</span><span class="va">pipeline</span>, optimized <span class="op">=</span> <span class="cn">FALSE</span><span class="op">)</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: as written&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 11</span></span>
+<span><span class="co">#&gt; filter(mpg &gt; 20)</span></span>
+<span><span class="co">#&gt; mutate(power_ratio = hp / wt)</span></span>
+<span><span class="co">#&gt; select(mpg, cyl, power_ratio)</span></span>
+<span><span class="co">#&gt; arrange(desc(mpg))</span></span>
+<span></span>
+<span><span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="va">pipeline</span><span class="op">)</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: 4 of 11 (mpg, cyl, hp, wt)</span></span>
+<span><span class="co">#&gt; filter(mpg &gt; 20)</span></span>
+<span><span class="co">#&gt; mutate(power_ratio = hp / wt)</span></span>
+<span><span class="co">#&gt; select(mpg, cyl, power_ratio)</span></span>
+<span><span class="co">#&gt; arrange(desc(mpg))</span></span></code></pre></div>
+<p>The first line says which plan it is. The source line says where the
+rows come from, and <code>columns read:</code> how many of the source’s
+columns the plan reads. The optimized plan reads 4 of the 11 columns of
+<code>mtcars</code>.</p>
+<p>Most verbs print as the call you wrote. The exceptions:</p>
 <table class="table">
 <colgroup>
-<col width="37%">
-<col width="62%">
+<col width="22%">
+<col width="77%">
 </colgroup>
 <thead><tr class="header">
 <th>Verb</th>
-<th>AST node</th>
+<th>What the plan shows</th>
 </tr></thead>
 <tbody>
 <tr class="odd">
 <td>
 <code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code> that renames</td>
 <td>
-<code>select</code> with a <code>rename</code> above it</td>
+<code>select(...)</code> with a <code>rename(new = old)</code> after
+it</td>
 </tr>
 <tr class="even">
-<td>
-<code><a href="https://rdrr.io/r/utils/head.html" class="external-link">head()</a></code>, ungrouped <code><a href="https://dplyr.tidyverse.org/reference/slice.html" class="external-link">slice()</a></code>,
-<code><a href="https://dplyr.tidyverse.org/reference/slice.html" class="external-link">slice_head()</a></code>, <code><a href="https://dplyr.tidyverse.org/reference/slice.html" class="external-link">slice_min()</a></code>
-</td>
-<td><code>slice</code></td>
+<td><code><a href="https://rdrr.io/r/utils/head.html" class="external-link">head()</a></code></td>
+<td><code>slice_head(n = 4)</code></td>
 </tr>
 <tr class="odd">
 <td><code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collapse()</a></code></td>
-<td><code>barrier</code></td>
+<td><code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collapse()</a></code></td>
 </tr>
 <tr class="even">
 <td>
 <code><a href="https://dplyr.tidyverse.org/reference/group_by.html" class="external-link">group_by()</a></code> on columns</td>
-<td>none, grouping is table metadata</td>
+<td>nothing, grouping is table metadata; <code><a href="https://dplyr.tidyverse.org/reference/group_by.html" class="external-link">group_by()</a></code> shows
+only before a <code><a href="https://dplyr.tidyverse.org/reference/summarise.html" class="external-link">summarise()</a></code> that uses it</td>
 </tr>
 <tr class="odd">
 <td><code>group_by(x = a + 1)</code></td>
-<td><code>mutate</code></td>
+<td>a <code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code> step</td>
 </tr>
 <tr class="even">
 <td>window functions such as <code><a href="https://dplyr.tidyverse.org/reference/row_number.html" class="external-link">row_number()</a></code>
 </td>
-<td>
-<code>window</code>, plus other nodes</td>
+<td>a <code>mutate(..win1.. = row_number(), .by = g)</code> step, plus
+other steps</td>
 </tr>
 </tbody>
 </table>
-<p>Some calls add several nodes. A grouped <code><a href="https://dplyr.tidyverse.org/reference/slice.html" class="external-link">slice_head()</a></code>
-records <code>arrange</code>, <code>window</code>, <code>mutate</code>,
-<code>filter</code> and <code>select</code>.</p>
+<p>Some calls show several steps. A grouped <code><a href="https://dplyr.tidyverse.org/reference/slice.html" class="external-link">slice_head()</a></code>
+shows an <code><a href="https://dplyr.tidyverse.org/reference/arrange.html" class="external-link">arrange()</a></code>, a window <code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code>, a
+<code><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter()</a></code> and a <code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code>.</p>
+<p>A step that is longer than 80 characters prints one argument per
+line. A join prints its right-hand plan under <code>y:</code>.</p>
 </div>
 <div class="section level2">
 <h2 id="the-passes">The passes<a class="anchor" aria-label="anchor" href="#the-passes"></a>
 </h2>
 <p>The optimizer runs these passes in order:</p>
 <ol style="list-style-type: decimal">
-<li>Projection pruning adds <code>select</code> nodes that drop columns
-nothing later reads.</li>
-<li>Mutate fusion merges a <code>mutate</code> with the
-<code>mutate</code> directly below it.</li>
-<li>Dead-column pruning drops <code>mutate</code> expressions and
-<code>select</code> columns that nothing above uses.</li>
-<li>Filter pushdown moves a <code>filter</code> below the
-<code>mutate</code> or <code>select</code> under it, or into the inputs
-of a join.</li>
-<li>Filter reordering merges consecutive <code>filter</code> nodes into
-one and sorts the predicates by estimated cost.</li>
+<li>Projection pruning drops the columns nothing later reads. On a table
+the plan shows it as the source’s <code>columns read:</code> line, for
+example <code>columns read: 3 of 11 (mpg, hp, wt)</code>; elsewhere as a
+<code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code> step.</li>
+<li>Mutate fusion merges a <code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code> with the
+<code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code> directly below it.</li>
+<li>Dead-column pruning drops <code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code> expressions and
+<code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code> columns that nothing above uses.</li>
+<li>Filter pushdown moves a <code><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter()</a></code> below the
+<code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code> or <code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code> under it, or into the
+inputs of a join.</li>
+<li>Filter reordering merges consecutive <code><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter()</a></code> steps
+into one and sorts the predicates by estimated cost.</li>
 <li>Scan pushdown hands a filter on a lazy
 <code><a href="../reference/read_parquet_gpu.html">read_parquet_gpu()</a></code> table to the parquet reader.</li>
 </ol>
@@ -191,51 +202,36 @@ nothing to work on is skipped, which doesn’t change the plan.</p>
 <h2 id="projection-pruning">Projection pruning<a class="anchor" aria-label="anchor" href="#projection-pruning"></a>
 </h2>
 <p>Only <code>mpg</code>, <code>hp</code> and <code>wt</code> are read
-from the 11 columns of <code>mtcars</code> here, so the pass adds a
-<code>select [3 cols]</code> above the source. The
-<code>select [2 cols]</code> at the top is the one in the pipeline.</p>
+from the 11 columns of <code>mtcars</code> here, so the source line
+reads <code>columns read: 3 of 11 (mpg, hp, wt)</code>. The
+<code>select(mpg, power_ratio)</code> at the end is the one in the
+pipeline.</p>
 <div class="sourceCode" id="cb3"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="va">mtcars</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>power_ratio <span class="op">=</span> <span class="va">hp</span> <span class="op">/</span> <span class="va">wt</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select</a></span><span class="op">(</span><span class="va">mpg</span>, <span class="va">power_ratio</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; Pending operations:</span></span>
-<span><span class="co">#&gt; ast_select [2 cols]</span></span>
-<span><span class="co">#&gt; | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | ast_source [11 cols]</span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; AST depth: 3 </span></span>
-<span><span class="co">#&gt; Node count: 3 </span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; Optimized plan:</span></span>
-<span><span class="co">#&gt; ast_select [2 cols]</span></span>
-<span><span class="co">#&gt; | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | ast_select [3 cols]</span></span>
-<span><span class="co">#&gt; | | | ast_source [11 cols]</span></span></code></pre></div>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: 3 of 11 (mpg, hp, wt)</span></span>
+<span><span class="co">#&gt; mutate(power_ratio = hp / wt)</span></span>
+<span><span class="co">#&gt; select(mpg, power_ratio)</span></span></code></pre></div>
 </div>
 <div class="section level2">
 <h2 id="mutate-fusion">Mutate fusion<a class="anchor" aria-label="anchor" href="#mutate-fusion"></a>
 </h2>
-<p>Three <code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code> calls become one node:</p>
+<p>Three <code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code> calls become one step:</p>
 <div class="sourceCode" id="cb4"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="va">mtcars</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>a <span class="op">=</span> <span class="va">hp</span> <span class="op">+</span> <span class="fl">10</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>b <span class="op">=</span> <span class="va">wt</span> <span class="op">*</span> <span class="fl">2</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>c <span class="op">=</span> <span class="va">a</span> <span class="op">+</span> <span class="va">b</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; Pending operations:</span></span>
-<span><span class="co">#&gt; ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | | ast_source [11 cols]</span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; AST depth: 4 </span></span>
-<span><span class="co">#&gt; Node count: 4 </span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; Optimized plan:</span></span>
-<span><span class="co">#&gt; ast_mutate [3 expressions]</span></span>
-<span><span class="co">#&gt; | ast_source [11 cols]</span></span></code></pre></div>
-<p>The fused node evaluates its expressions in the order you wrote them,
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 11</span></span>
+<span><span class="co">#&gt; mutate(a = hp + 10, b = wt * 2, c = a + b)</span></span></code></pre></div>
+<p>The fused step evaluates its expressions in the order you wrote them,
 each one seeing the columns the earlier ones left. That’s dplyr’s order,
 so <code>c</code> below uses the original <code>a</code> and
 <code>b</code>, as in dplyr:</p>
@@ -261,31 +257,34 @@ so <code>c</code> below uses the original <code>a</code> and
 <p>Two mutates don’t fuse when they hold more than 8 expressions
 together, or when the upper one reads more than 4 columns the lower one
 writes. Overwritten columns count as written. Here 5 + 4 expressions
-stay as two nodes:</p>
+stay as two steps:</p>
 <div class="sourceCode" id="cb6"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="va">mtcars</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>e1 <span class="op">=</span> <span class="va">mpg</span> <span class="op">+</span> <span class="fl">1</span>, e2 <span class="op">=</span> <span class="va">mpg</span> <span class="op">+</span> <span class="fl">2</span>, e3 <span class="op">=</span> <span class="va">mpg</span> <span class="op">+</span> <span class="fl">3</span>, e4 <span class="op">=</span> <span class="va">mpg</span> <span class="op">+</span> <span class="fl">4</span>, e5 <span class="op">=</span> <span class="va">mpg</span> <span class="op">+</span> <span class="fl">5</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>e6 <span class="op">=</span> <span class="va">mpg</span> <span class="op">+</span> <span class="fl">6</span>, e7 <span class="op">=</span> <span class="va">mpg</span> <span class="op">+</span> <span class="fl">7</span>, e8 <span class="op">=</span> <span class="va">mpg</span> <span class="op">+</span> <span class="fl">8</span>, e9 <span class="op">=</span> <span class="va">mpg</span> <span class="op">+</span> <span class="fl">9</span><span class="op">)</span> <span class="op">|&gt;</span></span>
-<span>  <span class="fu">optimized</span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; ast_mutate [4 expressions]</span></span>
-<span><span class="co">#&gt; | ast_mutate [5 expressions]</span></span>
-<span><span class="co">#&gt; | | ast_source [11 cols]</span></span></code></pre></div>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 11</span></span>
+<span><span class="co">#&gt; mutate(e1 = mpg + 1, e2 = mpg + 2, e3 = mpg + 3, e4 = mpg + 4, e5 = mpg + 5)</span></span>
+<span><span class="co">#&gt; mutate(e6 = mpg + 6, e7 = mpg + 7, e8 = mpg + 8, e9 = mpg + 9)</span></span></code></pre></div>
 </div>
 <div class="section level2">
 <h2 id="dead-column-pruning">Dead-column pruning<a class="anchor" aria-label="anchor" href="#dead-column-pruning"></a>
 </h2>
 <p>The <code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code> keeps only <code>mpg</code> and
-<code>a</code>, so the <code>mutate</code> keeps one of its three
+<code>a</code>, so the <code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code> keeps one of its three
 expressions:</p>
 <div class="sourceCode" id="cb7"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="va">mtcars</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>a <span class="op">=</span> <span class="va">hp</span> <span class="op">+</span> <span class="fl">10</span>, b <span class="op">=</span> <span class="va">wt</span> <span class="op">*</span> <span class="fl">2</span>, c <span class="op">=</span> <span class="va">mpg</span> <span class="op">*</span> <span class="fl">2</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select</a></span><span class="op">(</span><span class="va">mpg</span>, <span class="va">a</span><span class="op">)</span> <span class="op">|&gt;</span></span>
-<span>  <span class="fu">optimized</span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; ast_select [2 cols]</span></span>
-<span><span class="co">#&gt; | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | ast_select [2 cols]</span></span>
-<span><span class="co">#&gt; | | | ast_source [11 cols]</span></span></code></pre></div>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: 2 of 11 (mpg, hp)</span></span>
+<span><span class="co">#&gt; mutate(a = hp + 10)</span></span>
+<span><span class="co">#&gt; select(mpg, a)</span></span></code></pre></div>
 <p>The pass runs after fusion, so it also prunes across
 <code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code> calls that fused. It keeps an unused expression in
 three cases:</p>
@@ -303,16 +302,18 @@ result. <code>%/%</code>, <code>%%</code> and an operation with a
 literal <code>NA</code> operand never warn, so they aren’t checked.</li>
 </ul>
 <p>Here <code>y</code> is unused, but <code>a + b</code> is checked, so
-the node keeps both expressions:</p>
+the step keeps both expressions:</p>
 <div class="sourceCode" id="cb8"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/data.frame.html" class="external-link">data.frame</a></span><span class="op">(</span>a <span class="op">=</span> <span class="fl">1</span><span class="op">:</span><span class="fl">4</span>, b <span class="op">=</span> <span class="fl">4</span><span class="op">:</span><span class="fl">1</span>, x <span class="op">=</span> <span class="fl">1</span><span class="op">)</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>y <span class="op">=</span> <span class="va">a</span> <span class="op">+</span> <span class="va">b</span>, w <span class="op">=</span> <span class="va">x</span> <span class="op">*</span> <span class="fl">2</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select</a></span><span class="op">(</span><span class="va">a</span>, <span class="va">w</span><span class="op">)</span> <span class="op">|&gt;</span></span>
-<span>  <span class="fu">optimized</span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; ast_select [2 cols]</span></span>
-<span><span class="co">#&gt; | ast_mutate [2 expressions]</span></span>
-<span><span class="co">#&gt; | | ast_source [3 cols]</span></span></code></pre></div>
-<p>The pass also narrows <code>select</code> nodes. Here the first
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 3</span></span>
+<span><span class="co">#&gt; mutate(y = a + b, w = x * 2)</span></span>
+<span><span class="co">#&gt; select(a, w)</span></span></code></pre></div>
+<p>The pass also narrows <code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code> steps. Here the first
 <code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code> ends up keeping only <code>a</code>, like the
 second:</p>
 <div class="sourceCode" id="cb9"><pre class="downlit sourceCode r">
@@ -320,22 +321,14 @@ second:</p>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select</a></span><span class="op">(</span><span class="va">a</span>, <span class="va">b</span>, <span class="va">c</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select</a></span><span class="op">(</span><span class="va">a</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; Pending operations:</span></span>
-<span><span class="co">#&gt; ast_select [1 cols]</span></span>
-<span><span class="co">#&gt; | ast_select [3 cols]</span></span>
-<span><span class="co">#&gt; | | ast_source [3 cols]</span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; AST depth: 3 </span></span>
-<span><span class="co">#&gt; Node count: 3 </span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; Optimized plan:</span></span>
-<span><span class="co">#&gt; ast_select [1 cols]</span></span>
-<span><span class="co">#&gt; | ast_source [3 cols]</span></span></code></pre></div>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: 1 of 3 (a)</span></span></code></pre></div>
 </div>
 <div class="section level2">
 <h2 id="filter-pushdown">Filter pushdown<a class="anchor" aria-label="anchor" href="#filter-pushdown"></a>
 </h2>
-<p>Moving a filter down means the nodes below it see fewer rows.</p>
+<p>Moving a filter down means the steps below it see fewer rows.</p>
 <div class="section level3">
 <h3 id="past-a-mutate">Past a mutate<a class="anchor" aria-label="anchor" href="#past-a-mutate"></a>
 </h3>
@@ -356,94 +349,77 @@ maybe warn on, in rows the filter drops, or</li>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>power_ratio <span class="op">=</span> <span class="va">hp</span> <span class="op">/</span> <span class="va">wt</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">mpg</span> <span class="op">&gt;</span> <span class="fl">20</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; Pending operations:</span></span>
-<span><span class="co">#&gt; ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | ast_source [11 cols]</span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; AST depth: 3 </span></span>
-<span><span class="co">#&gt; Node count: 3 </span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; Optimized plan:</span></span>
-<span><span class="co">#&gt; ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | ast_source [11 cols]</span></span></code></pre></div>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 11</span></span>
+<span><span class="co">#&gt; filter(mpg &gt; 20)</span></span>
+<span><span class="co">#&gt; mutate(power_ratio = hp / wt)</span></span></code></pre></div>
 <p>The mutate creates <code>power_ratio</code>, so this one stays:</p>
 <div class="sourceCode" id="cb11"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="va">mtcars</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>power_ratio <span class="op">=</span> <span class="va">hp</span> <span class="op">/</span> <span class="va">wt</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">power_ratio</span> <span class="op">&gt;</span> <span class="fl">50</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; Pending operations:</span></span>
-<span><span class="co">#&gt; ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | ast_source [11 cols]</span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; AST depth: 3 </span></span>
-<span><span class="co">#&gt; Node count: 3 </span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; Optimized plan:</span></span>
-<span><span class="co">#&gt; ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | ast_source [11 cols]</span></span></code></pre></div>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 11</span></span>
+<span><span class="co">#&gt; mutate(power_ratio = hp / wt)</span></span>
+<span><span class="co">#&gt; filter(power_ratio &gt; 50)</span></span></code></pre></div>
 </div>
 <div class="section level3">
 <h3 id="past-a-select">Past a select<a class="anchor" aria-label="anchor" href="#past-a-select"></a>
 </h3>
-<p>A filter moves below a <code>select</code> that keeps every column
-the filter reads. The lower <code>select</code> here is the one
-projection pruning added to drop <code>c</code>:</p>
+<p>A filter moves below a <code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code> that keeps every column
+the filter reads. Here projection pruning drops <code>c</code> at the
+source, and the filter moves below the pipeline’s <code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code>
+but not below the pruning:</p>
 <div class="sourceCode" id="cb12"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/data.frame.html" class="external-link">data.frame</a></span><span class="op">(</span>a <span class="op">=</span> <span class="fl">1</span><span class="op">:</span><span class="fl">20</span>, b <span class="op">=</span> <span class="fl">1</span>, c <span class="op">=</span> <span class="fl">2</span><span class="op">)</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select</a></span><span class="op">(</span><span class="va">b</span>, <span class="va">a</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">a</span> <span class="op">&gt;</span> <span class="fl">10</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; Pending operations:</span></span>
-<span><span class="co">#&gt; ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | ast_select [2 cols]</span></span>
-<span><span class="co">#&gt; | | ast_source [3 cols]</span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; AST depth: 3 </span></span>
-<span><span class="co">#&gt; Node count: 3 </span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; Optimized plan:</span></span>
-<span><span class="co">#&gt; ast_select [2 cols]</span></span>
-<span><span class="co">#&gt; | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | ast_select [2 cols]</span></span>
-<span><span class="co">#&gt; | | | ast_source [3 cols]</span></span></code></pre></div>
-<p>A filter never moves below a <code>select</code> that projection
-pruning added. A <code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code> that renames a column, such as
-<code>select(b2 = b, a)</code>, records a <code>rename</code> node,
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: 2 of 3 (a, b)</span></span>
+<span><span class="co">#&gt; filter(a &gt; 10)</span></span>
+<span><span class="co">#&gt; select(b, a)</span></span></code></pre></div>
+<p>A filter never moves below the pruning of a source or a
+<code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code> that projection pruning added. A
+<code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code> that renames a column, such as
+<code>select(b2 = b, a)</code>, shows a <code><a href="https://dplyr.tidyverse.org/reference/rename.html" class="external-link">rename()</a></code> step,
 which is a barrier, so a filter after it stays put.</p>
 </div>
 <div class="section level3">
 <h3 id="one-step-per-filter">One step per filter<a class="anchor" aria-label="anchor" href="#one-step-per-filter"></a>
 </h3>
-<p>Pushdown moves each filter below at most one node. Here the filter
-passes the <code>select</code> but stops above the <code>mutate</code>,
-even though it could pass that too:</p>
+<p>Pushdown moves each filter below at most one step. Here the filter
+passes the <code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code> but stops above the
+<code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code>, even though it could pass that too:</p>
 <div class="sourceCode" id="cb13"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/data.frame.html" class="external-link">data.frame</a></span><span class="op">(</span>k <span class="op">=</span> <span class="fl">1</span><span class="op">:</span><span class="fl">20</span>, a <span class="op">=</span> <span class="fl">1</span>, b <span class="op">=</span> <span class="fl">2</span><span class="op">)</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>z <span class="op">=</span> <span class="va">a</span> <span class="op">+</span> <span class="fl">1</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select</a></span><span class="op">(</span><span class="va">k</span>, <span class="va">a</span>, <span class="va">z</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">k</span> <span class="op">&gt;</span> <span class="fl">10</span><span class="op">)</span> <span class="op">|&gt;</span></span>
-<span>  <span class="fu">optimized</span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; ast_select [3 cols]</span></span>
-<span><span class="co">#&gt; | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | | ast_select [2 cols]</span></span>
-<span><span class="co">#&gt; | | | | ast_source [3 cols]</span></span></code></pre></div>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: 2 of 3 (k, a)</span></span>
+<span><span class="co">#&gt; mutate(z = a + 1)</span></span>
+<span><span class="co">#&gt; filter(k &gt; 10)</span></span>
+<span><span class="co">#&gt; select(k, a, z)</span></span></code></pre></div>
 <p>This is where fusion matters. Two mutates that fused count as one
-node, so the filter gets below both:</p>
+step, so the filter gets below both:</p>
 <div class="sourceCode" id="cb14"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="va">mtcars</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>a <span class="op">=</span> <span class="va">hp</span> <span class="op">+</span> <span class="fl">10</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>b <span class="op">=</span> <span class="va">wt</span> <span class="op">*</span> <span class="fl">2</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">mpg</span> <span class="op">&gt;</span> <span class="fl">20</span><span class="op">)</span> <span class="op">|&gt;</span></span>
-<span>  <span class="fu">optimized</span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; ast_mutate [2 expressions]</span></span>
-<span><span class="co">#&gt; | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | ast_source [11 cols]</span></span></code></pre></div>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 11</span></span>
+<span><span class="co">#&gt; filter(mpg &gt; 20)</span></span>
+<span><span class="co">#&gt; mutate(a = hp + 10, b = wt * 2)</span></span></code></pre></div>
 <p>With the 5 + 4 expressions from above, the mutates don’t fuse and the
 filter gets below the top one only:</p>
 <div class="sourceCode" id="cb15"><pre class="downlit sourceCode r">
@@ -451,11 +427,13 @@ filter gets below the top one only:</p>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>e1 <span class="op">=</span> <span class="va">mpg</span> <span class="op">+</span> <span class="fl">1</span>, e2 <span class="op">=</span> <span class="va">mpg</span> <span class="op">+</span> <span class="fl">2</span>, e3 <span class="op">=</span> <span class="va">mpg</span> <span class="op">+</span> <span class="fl">3</span>, e4 <span class="op">=</span> <span class="va">mpg</span> <span class="op">+</span> <span class="fl">4</span>, e5 <span class="op">=</span> <span class="va">mpg</span> <span class="op">+</span> <span class="fl">5</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>e6 <span class="op">=</span> <span class="va">mpg</span> <span class="op">+</span> <span class="fl">6</span>, e7 <span class="op">=</span> <span class="va">mpg</span> <span class="op">+</span> <span class="fl">7</span>, e8 <span class="op">=</span> <span class="va">mpg</span> <span class="op">+</span> <span class="fl">8</span>, e9 <span class="op">=</span> <span class="va">mpg</span> <span class="op">+</span> <span class="fl">9</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">mpg</span> <span class="op">&gt;</span> <span class="fl">20</span><span class="op">)</span> <span class="op">|&gt;</span></span>
-<span>  <span class="fu">optimized</span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; ast_mutate [4 expressions]</span></span>
-<span><span class="co">#&gt; | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | ast_mutate [5 expressions]</span></span>
-<span><span class="co">#&gt; | | | ast_source [11 cols]</span></span></code></pre></div>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 11</span></span>
+<span><span class="co">#&gt; mutate(e1 = mpg + 1, e2 = mpg + 2, e3 = mpg + 3, e4 = mpg + 4, e5 = mpg + 5)</span></span>
+<span><span class="co">#&gt; filter(mpg &gt; 20)</span></span>
+<span><span class="co">#&gt; mutate(e6 = mpg + 6, e7 = mpg + 7, e8 = mpg + 8, e9 = mpg + 9)</span></span></code></pre></div>
 </div>
 <div class="section level3">
 <h3 id="into-a-join">Into a join<a class="anchor" aria-label="anchor" href="#into-a-join"></a>
@@ -466,15 +444,19 @@ use two small tables:</p>
 <code class="sourceCode R"><span><span class="va">x</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/data.frame.html" class="external-link">data.frame</a></span><span class="op">(</span>k <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">1</span>, <span class="fl">2</span>, <span class="fl">3</span>, <span class="fl">4</span><span class="op">)</span>, a <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">5</span>, <span class="fl">15</span>, <span class="fl">25</span>, <span class="fl">35</span><span class="op">)</span><span class="op">)</span><span class="op">)</span></span>
 <span><span class="va">y</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/data.frame.html" class="external-link">data.frame</a></span><span class="op">(</span>k <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">1</span>, <span class="fl">2</span>, <span class="fl">2</span>, <span class="fl">4</span><span class="op">)</span>, v <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">10</span>, <span class="fl">20</span>, <span class="fl">30</span>, <span class="fl">40</span><span class="op">)</span><span class="op">)</span><span class="op">)</span></span></code></pre></div>
 <p>For <code><a href="https://dplyr.tidyverse.org/reference/filter-joins.html" class="external-link">semi_join()</a></code> and <code><a href="https://dplyr.tidyverse.org/reference/filter-joins.html" class="external-link">anti_join()</a></code> the whole
-filter moves into the left input. The <code>select</code> on the right
-input is projection pruning keeping only the key:</p>
+filter moves into the left input. The right input’s
+<code>columns read:</code> line shows projection pruning keeping only
+the key:</p>
 <div class="sourceCode" id="cb17"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="va">x</span> <span class="op">|&gt;</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter-joins.html" class="external-link">semi_join</a></span><span class="op">(</span><span class="va">y</span>, by <span class="op">=</span> <span class="st">"k"</span><span class="op">)</span> <span class="op">|&gt;</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">a</span> <span class="op">&gt;</span> <span class="fl">10</span><span class="op">)</span> <span class="op">|&gt;</span> <span class="fu">optimized</span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; ast_join [semi join; on k == k]</span></span>
-<span><span class="co">#&gt; | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | ast_source [2 cols]</span></span>
-<span><span class="co">#&gt; | ast_select [1 cols]</span></span>
-<span><span class="co">#&gt; | | ast_source [2 cols]</span></span></code></pre></div>
+<code class="sourceCode R"><span><span class="va">x</span> <span class="op">|&gt;</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter-joins.html" class="external-link">semi_join</a></span><span class="op">(</span><span class="va">y</span>, by <span class="op">=</span> <span class="st">"k"</span><span class="op">)</span> <span class="op">|&gt;</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">a</span> <span class="op">&gt;</span> <span class="fl">10</span><span class="op">)</span> <span class="op">|&gt;</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 2</span></span>
+<span><span class="co">#&gt; filter(a &gt; 10)</span></span>
+<span><span class="co">#&gt; semi_join(y, by = join_by(k))</span></span>
+<span><span class="co">#&gt;   y:</span></span>
+<span><span class="co">#&gt;     table on the GPU</span></span>
+<span><span class="co">#&gt;       columns read: 1 of 2 (k)</span></span></code></pre></div>
 <p>For <code><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">inner_join()</a></code>, <code><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">left_join()</a></code> and
 <code><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">right_join()</a></code>, the default <code>relationship</code> blocks
 pushdown. dplyr checks for many-to-many matches over the full inputs,
@@ -483,11 +465,15 @@ check only for joins whose conditions are all <code>==</code>, called
 from your own code. So with <code>relationship</code> and
 <code>multiple</code> left at their defaults, nothing moves:</p>
 <div class="sourceCode" id="cb18"><pre class="downlit sourceCode r">
-<code class="sourceCode R"><span><span class="va">x</span> <span class="op">|&gt;</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">inner_join</a></span><span class="op">(</span><span class="va">y</span>, by <span class="op">=</span> <span class="st">"k"</span><span class="op">)</span> <span class="op">|&gt;</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">a</span> <span class="op">&gt;</span> <span class="fl">10</span><span class="op">)</span> <span class="op">|&gt;</span> <span class="fu">optimized</span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | ast_join [inner join; on k == k]</span></span>
-<span><span class="co">#&gt; | | ast_source [2 cols]</span></span>
-<span><span class="co">#&gt; | | ast_source [2 cols]</span></span></code></pre></div>
+<code class="sourceCode R"><span><span class="va">x</span> <span class="op">|&gt;</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">inner_join</a></span><span class="op">(</span><span class="va">y</span>, by <span class="op">=</span> <span class="st">"k"</span><span class="op">)</span> <span class="op">|&gt;</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">a</span> <span class="op">&gt;</span> <span class="fl">10</span><span class="op">)</span> <span class="op">|&gt;</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 2</span></span>
+<span><span class="co">#&gt; inner_join(y, by = join_by(k))</span></span>
+<span><span class="co">#&gt;   y:</span></span>
+<span><span class="co">#&gt;     table on the GPU</span></span>
+<span><span class="co">#&gt;       columns read: all 2</span></span>
+<span><span class="co">#&gt; filter(a &gt; 10)</span></span></code></pre></div>
 <p>Joins dplyr doesn’t check are recorded as
 <code>relationship = "many-to-many"</code>. That covers inequality,
 <code>closest()</code>, <code><a href="https://dplyr.tidyverse.org/reference/between.html" class="external-link">between()</a></code>, <code>overlaps()</code>
@@ -497,11 +483,15 @@ although no argument is set:</p>
 <div class="sourceCode" id="cb19"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">y_k2</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/data.frame.html" class="external-link">data.frame</a></span><span class="op">(</span>k2 <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">1</span>, <span class="fl">2</span>, <span class="fl">2</span>, <span class="fl">4</span><span class="op">)</span>, v <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">10</span>, <span class="fl">20</span>, <span class="fl">30</span>, <span class="fl">40</span><span class="op">)</span><span class="op">)</span><span class="op">)</span></span>
 <span></span>
-<span><span class="va">x</span> <span class="op">|&gt;</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">inner_join</a></span><span class="op">(</span><span class="va">y_k2</span>, <span class="fu"><a href="https://dplyr.tidyverse.org/reference/join_by.html" class="external-link">join_by</a></span><span class="op">(</span><span class="va">k</span> <span class="op">&gt;=</span> <span class="va">k2</span><span class="op">)</span><span class="op">)</span> <span class="op">|&gt;</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">a</span> <span class="op">&gt;</span> <span class="fl">10</span><span class="op">)</span> <span class="op">|&gt;</span> <span class="fu">optimized</span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; ast_join [inner join; on k &gt;= k2]</span></span>
-<span><span class="co">#&gt; | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | ast_source [2 cols]</span></span>
-<span><span class="co">#&gt; | ast_source [2 cols]</span></span></code></pre></div>
+<span><span class="va">x</span> <span class="op">|&gt;</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">inner_join</a></span><span class="op">(</span><span class="va">y_k2</span>, <span class="fu"><a href="https://dplyr.tidyverse.org/reference/join_by.html" class="external-link">join_by</a></span><span class="op">(</span><span class="va">k</span> <span class="op">&gt;=</span> <span class="va">k2</span><span class="op">)</span><span class="op">)</span> <span class="op">|&gt;</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">a</span> <span class="op">&gt;</span> <span class="fl">10</span><span class="op">)</span> <span class="op">|&gt;</span> <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 2</span></span>
+<span><span class="co">#&gt; filter(a &gt; 10)</span></span>
+<span><span class="co">#&gt; inner_join(y, by = join_by(k &gt;= k2))</span></span>
+<span><span class="co">#&gt;   y:</span></span>
+<span><span class="co">#&gt;     table on the GPU</span></span>
+<span><span class="co">#&gt;       columns read: all 2</span></span></code></pre></div>
 <p>Nothing moves with <code>unmatched = "error"</code> or a
 <code>relationship</code> of <code>"one-to-one"</code>,
 <code>"one-to-many"</code> or <code>"many-to-one"</code>. Otherwise, for
@@ -523,46 +513,62 @@ stays:</p>
 <code class="sourceCode R"><span><span class="va">x</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">inner_join</a></span><span class="op">(</span><span class="va">y</span>, by <span class="op">=</span> <span class="st">"k"</span>, relationship <span class="op">=</span> <span class="st">"many-to-many"</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">a</span> <span class="op">&gt;</span> <span class="fl">10</span>, <span class="va">v</span> <span class="op">&gt;</span> <span class="fl">15</span><span class="op">)</span> <span class="op">|&gt;</span></span>
-<span>  <span class="fu">optimized</span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; ast_join [inner join; on k == k]</span></span>
-<span><span class="co">#&gt; | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | ast_source [2 cols]</span></span>
-<span><span class="co">#&gt; | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | ast_source [2 cols]</span></span>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 2</span></span>
+<span><span class="co">#&gt; filter(a &gt; 10)</span></span>
+<span><span class="co">#&gt; inner_join(y, by = join_by(k), relationship = "many-to-many")</span></span>
+<span><span class="co">#&gt;   y:</span></span>
+<span><span class="co">#&gt;     table on the GPU</span></span>
+<span><span class="co">#&gt;       columns read: all 2</span></span>
+<span><span class="co">#&gt;     filter(v &gt; 15)</span></span>
 <span></span>
 <span><span class="va">x</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">left_join</a></span><span class="op">(</span><span class="va">y</span>, by <span class="op">=</span> <span class="st">"k"</span>, relationship <span class="op">=</span> <span class="st">"many-to-many"</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">a</span> <span class="op">&gt;</span> <span class="fl">10</span>, <span class="va">v</span> <span class="op">&gt;</span> <span class="fl">15</span><span class="op">)</span> <span class="op">|&gt;</span></span>
-<span>  <span class="fu">optimized</span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | ast_join [left join; on k == k]</span></span>
-<span><span class="co">#&gt; | | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | | ast_source [2 cols]</span></span>
-<span><span class="co">#&gt; | | ast_source [2 cols]</span></span></code></pre></div>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 2</span></span>
+<span><span class="co">#&gt; filter(a &gt; 10)</span></span>
+<span><span class="co">#&gt; left_join(y, by = join_by(k), relationship = "many-to-many")</span></span>
+<span><span class="co">#&gt;   y:</span></span>
+<span><span class="co">#&gt;     table on the GPU</span></span>
+<span><span class="co">#&gt;       columns read: all 2</span></span>
+<span><span class="co">#&gt; filter(v &gt; 15)</span></span></code></pre></div>
 <p>With <code>multiple = "first"</code>, <code>a &gt; 10</code> still
 moves and <code>v &gt; 15</code> stays:</p>
 <div class="sourceCode" id="cb21"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">x</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">inner_join</a></span><span class="op">(</span><span class="va">y</span>, by <span class="op">=</span> <span class="st">"k"</span>, relationship <span class="op">=</span> <span class="st">"many-to-many"</span>, multiple <span class="op">=</span> <span class="st">"first"</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">a</span> <span class="op">&gt;</span> <span class="fl">10</span>, <span class="va">v</span> <span class="op">&gt;</span> <span class="fl">15</span><span class="op">)</span> <span class="op">|&gt;</span></span>
-<span>  <span class="fu">optimized</span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | ast_join [inner join; on k == k]</span></span>
-<span><span class="co">#&gt; | | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | | ast_source [2 cols]</span></span>
-<span><span class="co">#&gt; | | ast_source [2 cols]</span></span></code></pre></div>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 2</span></span>
+<span><span class="co">#&gt; filter(a &gt; 10)</span></span>
+<span><span class="co">#&gt; inner_join(y, by = join_by(k), multiple = "first", relationship = "many-to-many")</span></span>
+<span><span class="co">#&gt;   y:</span></span>
+<span><span class="co">#&gt;     table on the GPU</span></span>
+<span><span class="co">#&gt;       columns read: all 2</span></span>
+<span><span class="co">#&gt; filter(v &gt; 15)</span></span></code></pre></div>
 <p>A <code><a href="https://dplyr.tidyverse.org/reference/cross_join.html" class="external-link">cross_join()</a></code> follows the inner join rules on both
 sides. A <code><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">full_join()</a></code> moves nothing.</p>
 <div class="sourceCode" id="cb22"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">x</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/cross_join.html" class="external-link">cross_join</a></span><span class="op">(</span><span class="va">y_k2</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">a</span> <span class="op">&gt;</span> <span class="fl">10</span>, <span class="va">v</span> <span class="op">&gt;</span> <span class="fl">15</span><span class="op">)</span> <span class="op">|&gt;</span></span>
-<span>  <span class="fu">optimized</span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; ast_join [cross join]</span></span>
-<span><span class="co">#&gt; | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | ast_source [2 cols]</span></span>
-<span><span class="co">#&gt; | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | ast_source [2 cols]</span></span></code></pre></div>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 2</span></span>
+<span><span class="co">#&gt; filter(a &gt; 10)</span></span>
+<span><span class="co">#&gt; cross_join(y)</span></span>
+<span><span class="co">#&gt;   y:</span></span>
+<span><span class="co">#&gt;     table on the GPU</span></span>
+<span><span class="co">#&gt;       columns read: all 2</span></span>
+<span><span class="co">#&gt;     filter(v &gt; 15)</span></span></code></pre></div>
 <p>Checked integer arithmetic is stricter. dplyr computes every
 predicate of one <code><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter()</a></code> call on the same rows, the rows
 the join keeps. A checked predicate moves only into the left input of a
@@ -576,19 +582,23 @@ of its <code><a href="https://dplyr.tidyverse.org/reference/filter.html" class="
 <span><span class="va">x_i</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">inner_join</a></span><span class="op">(</span><span class="va">y_i</span>, by <span class="op">=</span> <span class="st">"k"</span>, relationship <span class="op">=</span> <span class="st">"many-to-many"</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">a</span> <span class="op">&gt;</span> <span class="fl">10</span>, <span class="va">k</span> <span class="op">+</span> <span class="fl">1L</span> <span class="op">&gt;</span> <span class="fl">2L</span><span class="op">)</span> <span class="op">|&gt;</span></span>
-<span>  <span class="fu">optimized</span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; ast_filter [2 predicates]</span></span>
-<span><span class="co">#&gt; | ast_join [inner join; on k == k]</span></span>
-<span><span class="co">#&gt; | | ast_source [2 cols]</span></span>
-<span><span class="co">#&gt; | | ast_source [2 cols]</span></span></code></pre></div>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 2</span></span>
+<span><span class="co">#&gt; inner_join(y, by = join_by(k), relationship = "many-to-many")</span></span>
+<span><span class="co">#&gt;   y:</span></span>
+<span><span class="co">#&gt;     table on the GPU</span></span>
+<span><span class="co">#&gt;       columns read: all 2</span></span>
+<span><span class="co">#&gt; filter(a &gt; 10, k + 1L &gt; 2L)</span></span></code></pre></div>
 </div>
 </div>
 <div class="section level2">
 <h2 id="filter-reordering">Filter reordering<a class="anchor" aria-label="anchor" href="#filter-reordering"></a>
 </h2>
-<p>A chain of <code>filter</code> nodes becomes one node. A filter node
-runs as one expression, its predicates joined with <code>&amp;</code>
-into one row mask.</p>
+<p>A chain of <code><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter()</a></code> steps becomes one step. A filter
+step runs as one expression, its predicates joined with
+<code>&amp;</code> into one row mask.</p>
 <div class="sourceCode" id="cb24"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">d</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/data.frame.html" class="external-link">data.frame</a></span><span class="op">(</span>x <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">1</span>, <span class="fl">5</span>, <span class="fl">20</span>, <span class="fl">30</span><span class="op">)</span>, y <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">0</span>, <span class="fl">1</span>, <span class="fl">2</span>, <span class="fl">3</span><span class="op">)</span>, z <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">5</span>, <span class="fl">11</span>, <span class="fl">12</span>, <span class="fl">1</span><span class="op">)</span><span class="op">)</span></span>
 <span></span>
@@ -596,22 +606,15 @@ into one row mask.</p>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">x</span> <span class="op">&gt;</span> <span class="va">y</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">z</span> <span class="op">&gt;</span> <span class="fl">10</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; Pending operations:</span></span>
-<span><span class="co">#&gt; ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | ast_source [3 cols]</span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; AST depth: 3 </span></span>
-<span><span class="co">#&gt; Node count: 3 </span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; Optimized plan:</span></span>
-<span><span class="co">#&gt; ast_filter [2 predicates]</span></span>
-<span><span class="co">#&gt; | ast_source [3 cols]</span></span></code></pre></div>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 3</span></span>
+<span><span class="co">#&gt; filter(z &gt; 10, x &gt; y)</span></span></code></pre></div>
 <p>The merged predicates are sorted cheapest first. The cost is the size
 of the expression: 1 for a literal, 2 for a column, and 1 plus its
 arguments for a call. <code>z &gt; 10</code> costs 4 and
 <code>x &gt; y</code> costs 5, so <code>z &gt; 10</code> comes first. A
-single filter node isn’t touched, and its predicates keep your order.
+single filter step isn’t touched, and its predicates keep your order.
 Predicates that aren’t deterministic are merged but not sorted.</p>
 <p>Reordering runs after pushdown, so filters that pushdown brings
 together are merged. Here the second filter moves below the mutate and
@@ -622,19 +625,11 @@ joins the first:</p>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>r <span class="op">=</span> <span class="va">hp</span> <span class="op">/</span> <span class="va">wt</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">mpg</span> <span class="op">&gt;</span> <span class="fl">15</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; Pending operations:</span></span>
-<span><span class="co">#&gt; ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | | ast_source [11 cols]</span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; AST depth: 4 </span></span>
-<span><span class="co">#&gt; Node count: 4 </span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; Optimized plan:</span></span>
-<span><span class="co">#&gt; ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | ast_filter [2 predicates]</span></span>
-<span><span class="co">#&gt; | | ast_source [11 cols]</span></span></code></pre></div>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 11</span></span>
+<span><span class="co">#&gt; filter(mpg &gt; 15, cyl &gt; 4)</span></span>
+<span><span class="co">#&gt; mutate(r = hp / wt)</span></span></code></pre></div>
 <p>Some filters don’t merge:</p>
 <ul>
 <li>A filter on a grouped table and one on an ungrouped table stay
@@ -646,24 +641,17 @@ those filters keep. It can still absorb the filters above it.</li>
 listed under “Past a mutate” isn’t merged. The filters below it still
 are.</li>
 </ul>
-<p>So this stays two nodes:</p>
+<p>So this stays two steps:</p>
 <div class="sourceCode" id="cb26"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/data.frame.html" class="external-link">data.frame</a></span><span class="op">(</span>a <span class="op">=</span> <span class="fl">1</span><span class="op">:</span><span class="fl">4</span>, b <span class="op">=</span> <span class="fl">4</span><span class="op">:</span><span class="fl">1</span><span class="op">)</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">a</span> <span class="op">&lt;</span> <span class="fl">100L</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">a</span> <span class="op">+</span> <span class="va">b</span> <span class="op">&gt;</span> <span class="fl">0L</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; Pending operations:</span></span>
-<span><span class="co">#&gt; ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | ast_source [2 cols]</span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; AST depth: 3 </span></span>
-<span><span class="co">#&gt; Node count: 3 </span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; Optimized plan:</span></span>
-<span><span class="co">#&gt; ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | ast_source [2 cols]</span></span></code></pre></div>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 2</span></span>
+<span><span class="co">#&gt; filter(a &lt; 100L)</span></span>
+<span><span class="co">#&gt; filter(a + b &gt; 0L)</span></span></code></pre></div>
 </div>
 <div class="section level2">
 <h2 id="scan-pushdown">Scan pushdown<a class="anchor" aria-label="anchor" href="#scan-pushdown"></a>
@@ -674,14 +662,47 @@ exactly, so it can skip row groups. Only comparisons on integer,
 integer64, Date and POSIXct columns go to the reader. The rest of the
 filter runs after the read, and the rows are the same either way.
 Projection pruning also tells the reader which columns to read.
-<code>options(cuplyr.parquet_pushdown = FALSE)</code> turns both off.
-See <code><a href="../reference/read_parquet_gpu.html">?read_parquet_gpu</a></code> for the full rules.</p>
+<code><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain()</a></code> shows both: a scan prints as</p>
+<pre><code>parquet scan: flights.parquet
+  columns read: 5 of 41 (carrier, distance, air_time, dep_delay, arr_delay)
+  reader filter: distance &gt; 1000L</code></pre>
+<p><code>options(cuplyr.parquet_pushdown = FALSE)</code> turns both off.
+Then the scan says <code>columns read: all 41</code>, and any pruning
+shows as a <code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code> step above it. See
+<code><a href="../reference/read_parquet_gpu.html">?read_parquet_gpu</a></code> for the full rules.</p>
+</div>
+<div class="section level2">
+<h2 id="steps-that-run-on-the-cpu">Steps that run on the CPU<a class="anchor" aria-label="anchor" href="#steps-that-run-on-the-cpu"></a>
+</h2>
+<p>A call cuplyr can’t run on the GPU, such as <code><a href="https://rdrr.io/r/stats/Normal.html" class="external-link">pnorm()</a></code>,
+runs on the CPU at the verb: the pending plan is computed on the GPU,
+collected, handed to dplyr and uploaded again. The plan keeps what
+happened. It shows the verb, the expression, why it couldn’t run on the
+GPU and the plan the step computed, and the steps after it follow:</p>
+<div class="sourceCode" id="cb28"><pre class="downlit sourceCode r">
+<code class="sourceCode R"><span><span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="va">mtcars</span><span class="op">)</span> <span class="op">|&gt;</span></span>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">mpg</span> <span class="op">&gt;</span> <span class="fl">20</span><span class="op">)</span> <span class="op">|&gt;</span></span>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>p <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/stats/Normal.html" class="external-link">pnorm</a></span><span class="op">(</span><span class="va">mpg</span> <span class="op">/</span> <span class="fl">10</span><span class="op">)</span><span class="op">)</span> <span class="op">|&gt;</span></span>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">p</span> <span class="op">&gt;</span> <span class="fl">0.98</span><span class="op">)</span> <span class="op">|&gt;</span></span>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; CPU fallback: mutate() for pnorm(mpg / 10)</span></span>
+<span><span class="co">#&gt;   reason: `pnorm()` has no GPU implementation.</span></span>
+<span><span class="co">#&gt;   columns read: all 12</span></span>
+<span><span class="co">#&gt;   input (computed at the mutate() call):</span></span>
+<span><span class="co">#&gt;     table on the GPU</span></span>
+<span><span class="co">#&gt;       columns read: all 11</span></span>
+<span><span class="co">#&gt;     filter(mpg &gt; 20)</span></span>
+<span><span class="co">#&gt; filter(p &gt; 0.98)</span></span></code></pre></div>
+<p>The plan shows the newest three CPU steps; <code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">compute()</a></code> of
+a table with pending steps starts a new plan with no history. Printing
+the plan doesn’t run anything.</p>
 </div>
 <div class="section level2">
 <h2 id="barriers">Barriers<a class="anchor" aria-label="anchor" href="#barriers"></a>
 </h2>
-<p>The optimizer splits the plan at barrier nodes and optimizes each
-part on its own, so no pass moves a node across a barrier. These nodes
+<p>The optimizer splits the plan at barrier steps and optimizes each
+part on its own, so no pass moves a step across a barrier. These steps
 are barriers:</p>
 <table class="table">
 <colgroup>
@@ -689,50 +710,51 @@ are barriers:</p>
 <col width="68%">
 </colgroup>
 <thead><tr class="header">
-<th>Node</th>
+<th>Step</th>
 <th>Recorded by</th>
 </tr></thead>
 <tbody>
 <tr class="odd">
-<td><code>arrange</code></td>
+<td><code><a href="https://dplyr.tidyverse.org/reference/arrange.html" class="external-link">arrange()</a></code></td>
 <td><code><a href="https://dplyr.tidyverse.org/reference/arrange.html" class="external-link">arrange()</a></code></td>
 </tr>
 <tr class="even">
-<td><code>summarise</code></td>
+<td><code><a href="https://dplyr.tidyverse.org/reference/summarise.html" class="external-link">summarise()</a></code></td>
 <td><code><a href="https://dplyr.tidyverse.org/reference/summarise.html" class="external-link">summarise()</a></code></td>
 </tr>
 <tr class="odd">
-<td><code>reframe</code></td>
+<td><code><a href="https://dplyr.tidyverse.org/reference/reframe.html" class="external-link">reframe()</a></code></td>
 <td><code><a href="https://dplyr.tidyverse.org/reference/reframe.html" class="external-link">reframe()</a></code></td>
 </tr>
 <tr class="even">
-<td><code>distinct</code></td>
+<td><code><a href="https://dplyr.tidyverse.org/reference/distinct.html" class="external-link">distinct()</a></code></td>
 <td><code><a href="https://dplyr.tidyverse.org/reference/distinct.html" class="external-link">distinct()</a></code></td>
 </tr>
 <tr class="odd">
-<td><code>slice</code></td>
+<td>
+<code><a href="https://dplyr.tidyverse.org/reference/slice.html" class="external-link">slice_head()</a></code>, <code><a href="https://dplyr.tidyverse.org/reference/slice.html" class="external-link">slice()</a></code>,
+<code><a href="https://dplyr.tidyverse.org/reference/slice.html" class="external-link">slice_min()</a></code> and the like</td>
 <td>
 <code><a href="https://rdrr.io/r/utils/head.html" class="external-link">head()</a></code>, <code><a href="https://dplyr.tidyverse.org/reference/slice.html" class="external-link">slice()</a></code>,
 <code><a href="https://dplyr.tidyverse.org/reference/slice.html" class="external-link">slice_head()</a></code>, <code><a href="https://dplyr.tidyverse.org/reference/slice.html" class="external-link">slice_min()</a></code> and the like</td>
 </tr>
 <tr class="even">
-<td><code>rename</code></td>
+<td><code><a href="https://dplyr.tidyverse.org/reference/rename.html" class="external-link">rename()</a></code></td>
 <td>
 <code><a href="https://dplyr.tidyverse.org/reference/rename.html" class="external-link">rename()</a></code>, or a <code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code> that renames</td>
 </tr>
 <tr class="odd">
-<td><code>window</code></td>
+<td>a <code>mutate(..win1.. = &lt;window function&gt;)</code> step</td>
 <td>window functions in <code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code> or
 <code><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter()</a></code>
 </td>
 </tr>
 <tr class="even">
-<td><code>barrier</code></td>
+<td><code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collapse()</a></code></td>
 <td><code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collapse()</a></code></td>
 </tr>
 <tr class="odd">
-<td>
-<code>select</code> by position</td>
+<td>a <code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code> by position</td>
 <td>a <code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code> that picks a column twice, or any
 <code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code> on a table with repeated names</td>
 </tr>
@@ -740,7 +762,7 @@ are barriers:</p>
 </table>
 <p><code><a href="https://rdrr.io/r/utils/head.html" class="external-link">head()</a></code> shows why. Filtering the first four rows is not
 the same as taking the first four rows that pass the filter:</p>
-<div class="sourceCode" id="cb27"><pre class="downlit sourceCode r">
+<div class="sourceCode" id="cb29"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">d</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/data.frame.html" class="external-link">data.frame</a></span><span class="op">(</span>x <span class="op">=</span> <span class="fl">1</span><span class="op">:</span><span class="fl">10</span>, y <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="op">-</span><span class="fl">1</span>, <span class="fl">2</span>, <span class="op">-</span><span class="fl">3</span>, <span class="fl">4</span>, <span class="op">-</span><span class="fl">5</span>, <span class="fl">6</span>, <span class="op">-</span><span class="fl">7</span>, <span class="fl">8</span>, <span class="op">-</span><span class="fl">9</span>, <span class="fl">10</span><span class="op">)</span><span class="op">)</span></span>
 <span></span>
 <span><span class="va">q</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="va">d</span><span class="op">)</span> <span class="op">|&gt;</span></span>
@@ -749,19 +771,11 @@ the same as taking the first four rows that pass the filter:</p>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">y</span> <span class="op">&gt;</span> <span class="fl">0</span><span class="op">)</span></span>
 <span></span>
 <span><span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="va">q</span><span class="op">)</span></span>
-<span><span class="co">#&gt; Pending operations:</span></span>
-<span><span class="co">#&gt; ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | ast_slice [mode=head, n=4]</span></span>
-<span><span class="co">#&gt; | | ast_arrange [1 keys]</span></span>
-<span><span class="co">#&gt; | | | ast_source [2 cols]</span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; AST depth: 4 </span></span>
-<span><span class="co">#&gt; Node count: 4 </span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; Optimized plan:</span></span>
-<span><span class="co">#&gt; ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | ast_slice [mode=rank, order_by=x, desc=FALSE, n=4, with_ties=FALSE, top_k]</span></span>
-<span><span class="co">#&gt; | | ast_source [2 cols]</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 2</span></span>
+<span><span class="co">#&gt; slice_min(x, n = 4, with_ties = FALSE)  # top-k: arrange() |&gt; head()</span></span>
+<span><span class="co">#&gt; filter(y &gt; 0)</span></span>
 <span></span>
 <span><span class="fu"><a href="https://rdrr.io/r/base/all.equal.html" class="external-link">all.equal</a></span><span class="op">(</span></span>
 <span>  <span class="fu"><a href="https://rdrr.io/r/base/as.data.frame.html" class="external-link">as.data.frame</a></span><span class="op">(</span><span class="fu"><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collect</a></span><span class="op">(</span><span class="va">q</span><span class="op">)</span><span class="op">)</span>,</span>
@@ -769,10 +783,12 @@ the same as taking the first four rows that pass the filter:</p>
 <span>  check.attributes <span class="op">=</span> <span class="cn">FALSE</span></span>
 <span><span class="op">)</span></span>
 <span><span class="co">#&gt; [1] TRUE</span></span></code></pre></div>
-<p>The plan has no <code>arrange</code> node. <code>head(n)</code>
+<p>The plan has no <code><a href="https://dplyr.tidyverse.org/reference/arrange.html" class="external-link">arrange()</a></code> step. <code>head(n)</code>
 directly on an ungrouped <code><a href="https://dplyr.tidyverse.org/reference/arrange.html" class="external-link">arrange()</a></code> of one numeric, Date or
-POSIXct column becomes a single top-k <code>slice</code>, which picks
-the rows without sorting the whole table. It is still a barrier.</p>
+POSIXct column becomes a single top-k slice, which picks the rows
+without sorting the whole table. It prints as
+<code>slice_min(x, n = 4, with_ties = FALSE)  # top-k: arrange() |&gt; head()</code>,
+and is still a barrier.</p>
 <div class="section level3">
 <h3 id="segments">Segments<a class="anchor" aria-label="anchor" href="#segments"></a>
 </h3>
@@ -782,7 +798,7 @@ barrier and everything above it read, but it keeps every
 <code>mutate</code> expression, because dplyr would compute them. Here
 each filter moves below its own mutate, and <code><a href="https://dplyr.tidyverse.org/reference/arrange.html" class="external-link">arrange()</a></code> stays
 between them:</p>
-<div class="sourceCode" id="cb28"><pre class="downlit sourceCode r">
+<div class="sourceCode" id="cb30"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">d</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/data.frame.html" class="external-link">data.frame</a></span><span class="op">(</span>a <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">5</span>, <span class="fl">12</span>, <span class="fl">20</span>, <span class="fl">30</span><span class="op">)</span>, c <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">1</span>, <span class="fl">6</span>, <span class="fl">7</span>, <span class="fl">8</span><span class="op">)</span><span class="op">)</span></span>
 <span></span>
 <span><span class="va">q</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="va">d</span><span class="op">)</span> <span class="op">|&gt;</span></span>
@@ -793,30 +809,20 @@ between them:</p>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">c</span> <span class="op">&gt;</span> <span class="fl">5</span><span class="op">)</span></span>
 <span></span>
 <span><span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="va">q</span><span class="op">)</span></span>
-<span><span class="co">#&gt; Pending operations:</span></span>
-<span><span class="co">#&gt; ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | ast_arrange [1 keys]</span></span>
-<span><span class="co">#&gt; | | | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | | | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | | | | ast_source [2 cols]</span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; AST depth: 6 </span></span>
-<span><span class="co">#&gt; Node count: 6 </span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; Optimized plan:</span></span>
-<span><span class="co">#&gt; ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | ast_arrange [1 keys]</span></span>
-<span><span class="co">#&gt; | | | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | | | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | | | | ast_source [2 cols]</span></span></code></pre></div>
-<p>A join and its two inputs form one segment, together with the nodes
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 2</span></span>
+<span><span class="co">#&gt; filter(a &gt; 10)</span></span>
+<span><span class="co">#&gt; mutate(b = a + 1)</span></span>
+<span><span class="co">#&gt; arrange(b)</span></span>
+<span><span class="co">#&gt; filter(c &gt; 5)</span></span>
+<span><span class="co">#&gt; mutate(d = c + 1)</span></span></code></pre></div>
+<p>A join and its two inputs form one segment, together with the steps
 above it up to the next barrier. The passes don’t split a join’s inputs
 at barriers, so column pruning can reach below a barrier there.
 Projection pruning drops <code>b</code> below <code><a href="https://dplyr.tidyverse.org/reference/arrange.html" class="external-link">arrange()</a></code> in
 the left input:</p>
-<div class="sourceCode" id="cb29"><pre class="downlit sourceCode r">
+<div class="sourceCode" id="cb31"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">d2</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/data.frame.html" class="external-link">data.frame</a></span><span class="op">(</span>k <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">1</span>, <span class="fl">2</span>, <span class="fl">3</span>, <span class="fl">4</span><span class="op">)</span>, a <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">5</span>, <span class="fl">15</span>, <span class="fl">25</span>, <span class="fl">35</span><span class="op">)</span>, b <span class="op">=</span> <span class="fl">1</span><span class="op">:</span><span class="fl">4</span><span class="op">)</span><span class="op">)</span></span>
 <span><span class="va">y2</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/data.frame.html" class="external-link">data.frame</a></span><span class="op">(</span>k <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">1</span>, <span class="fl">2</span>, <span class="fl">2</span>, <span class="fl">4</span><span class="op">)</span>, v <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">10</span>, <span class="fl">20</span>, <span class="fl">30</span>, <span class="fl">40</span><span class="op">)</span><span class="op">)</span><span class="op">)</span></span>
 <span></span>
@@ -824,45 +830,39 @@ the left input:</p>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/arrange.html" class="external-link">arrange</a></span><span class="op">(</span><span class="va">a</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">inner_join</a></span><span class="op">(</span><span class="va">y2</span>, by <span class="op">=</span> <span class="st">"k"</span>, relationship <span class="op">=</span> <span class="st">"many-to-many"</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select</a></span><span class="op">(</span><span class="va">k</span>, <span class="va">v</span><span class="op">)</span> <span class="op">|&gt;</span></span>
-<span>  <span class="fu">optimized</span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; ast_select [2 cols]</span></span>
-<span><span class="co">#&gt; | ast_join [inner join; on k == k]</span></span>
-<span><span class="co">#&gt; | | ast_arrange [1 keys]</span></span>
-<span><span class="co">#&gt; | | | ast_select [2 cols]</span></span>
-<span><span class="co">#&gt; | | | | ast_source [3 cols]</span></span>
-<span><span class="co">#&gt; | | ast_source [2 cols]</span></span></code></pre></div>
+<span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: 2 of 3 (k, a)</span></span>
+<span><span class="co">#&gt; arrange(a)</span></span>
+<span><span class="co">#&gt; inner_join(y, by = join_by(k), relationship = "many-to-many")</span></span>
+<span><span class="co">#&gt;   y:</span></span>
+<span><span class="co">#&gt;     table on the GPU</span></span>
+<span><span class="co">#&gt;       columns read: all 2</span></span>
+<span><span class="co">#&gt; select(k, v)</span></span></code></pre></div>
 <p>To stop the optimizer at a point of your choosing, put
 <code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collapse()</a></code> there. Here the two filters aren’t merged and
 neither crosses it:</p>
-<div class="sourceCode" id="cb30"><pre class="downlit sourceCode r">
+<div class="sourceCode" id="cb32"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="fu"><a href="https://rdrr.io/r/base/data.frame.html" class="external-link">data.frame</a></span><span class="op">(</span>x <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">5</span>, <span class="fl">11</span>, <span class="fl">20</span><span class="op">)</span>, z <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">1</span>, <span class="fl">6</span>, <span class="fl">9</span><span class="op">)</span><span class="op">)</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">x</span> <span class="op">&gt;</span> <span class="fl">10</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span>y <span class="op">=</span> <span class="va">x</span> <span class="op">*</span> <span class="fl">2</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collapse</a></span><span class="op">(</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">z</span> <span class="op">&gt;</span> <span class="fl">5</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="op">)</span></span>
-<span><span class="co">#&gt; Pending operations:</span></span>
-<span><span class="co">#&gt; ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | ast_barrier</span></span>
-<span><span class="co">#&gt; | | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | | | ast_source [2 cols]</span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; AST depth: 5 </span></span>
-<span><span class="co">#&gt; Node count: 5 </span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; Optimized plan:</span></span>
-<span><span class="co">#&gt; ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | ast_barrier</span></span>
-<span><span class="co">#&gt; | | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | | ast_filter [1 predicates]</span></span>
-<span><span class="co">#&gt; | | | | ast_source [2 cols]</span></span></code></pre></div>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: all 2</span></span>
+<span><span class="co">#&gt; filter(x &gt; 10)</span></span>
+<span><span class="co">#&gt; mutate(y = x * 2)</span></span>
+<span><span class="co">#&gt; collapse()</span></span>
+<span><span class="co">#&gt; filter(z &gt; 5)</span></span></code></pre></div>
 </div>
 </div>
 <div class="section level2">
 <h2 id="a-longer-pipeline">A longer pipeline<a class="anchor" aria-label="anchor" href="#a-longer-pipeline"></a>
 </h2>
-<div class="sourceCode" id="cb31"><pre class="downlit sourceCode r">
+<div class="sourceCode" id="cb33"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="va">pipeline</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="va">mtcars</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate</a></span><span class="op">(</span></span>
 <span>    power_to_weight <span class="op">=</span> <span class="va">hp</span> <span class="op">/</span> <span class="va">wt</span>,</span>
@@ -876,26 +876,20 @@ neither crosses it:</p>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/arrange.html" class="external-link">arrange</a></span><span class="op">(</span><span class="fu"><a href="https://dplyr.tidyverse.org/reference/desc.html" class="external-link">desc</a></span><span class="op">(</span><span class="va">avg_score</span><span class="op">)</span><span class="op">)</span></span>
 <span></span>
 <span><span class="fu"><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain</a></span><span class="op">(</span><span class="va">pipeline</span><span class="op">)</span></span>
-<span><span class="co">#&gt; Pending operations:</span></span>
-<span><span class="co">#&gt; ast_arrange [1 keys]</span></span>
-<span><span class="co">#&gt; | ast_summarise [1 groups, 2 aggs]</span></span>
-<span><span class="co">#&gt; | | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | | ast_filter [2 predicates]</span></span>
-<span><span class="co">#&gt; | | | | ast_mutate [3 expressions]</span></span>
-<span><span class="co">#&gt; | | | | | ast_source [11 cols]</span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; AST depth: 6 </span></span>
-<span><span class="co">#&gt; Node count: 6 </span></span>
-<span><span class="co">#&gt; </span></span>
-<span><span class="co">#&gt; Optimized plan:</span></span>
-<span><span class="co">#&gt; ast_arrange [1 keys]</span></span>
-<span><span class="co">#&gt; | ast_summarise [1 groups, 2 aggs]</span></span>
-<span><span class="co">#&gt; | | ast_mutate [1 expressions]</span></span>
-<span><span class="co">#&gt; | | | ast_select [3 cols]</span></span>
-<span><span class="co">#&gt; | | | | ast_mutate [3 expressions]</span></span>
-<span><span class="co">#&gt; | | | | | ast_filter [2 predicates]</span></span>
-<span><span class="co">#&gt; | | | | | | ast_select [4 cols]</span></span>
-<span><span class="co">#&gt; | | | | | | | ast_source [11 cols]</span></span>
+<span><span class="co">#&gt; &lt;cuplyr plan: optimized&gt;</span></span>
+<span><span class="co">#&gt; table on the GPU</span></span>
+<span><span class="co">#&gt;   columns read: 4 of 11 (mpg, cyl, hp, wt)</span></span>
+<span><span class="co">#&gt; filter(cyl %in% c(4, 6), mpg &gt; 18)</span></span>
+<span><span class="co">#&gt; mutate(</span></span>
+<span><span class="co">#&gt;   power_to_weight = hp / wt,</span></span>
+<span><span class="co">#&gt;   fuel_efficiency = mpg / cyl,</span></span>
+<span><span class="co">#&gt;   is_powerful = hp &gt; 150</span></span>
+<span><span class="co">#&gt; )</span></span>
+<span><span class="co">#&gt; select(cyl, power_to_weight, fuel_efficiency)</span></span>
+<span><span class="co">#&gt; mutate(efficiency_score = fuel_efficiency * power_to_weight)</span></span>
+<span><span class="co">#&gt; group_by(cyl)</span></span>
+<span><span class="co">#&gt; summarise(avg_score = mean(efficiency_score), count = n())</span></span>
+<span><span class="co">#&gt; arrange(desc(avg_score))</span></span>
 <span></span>
 <span><span class="fu"><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collect</a></span><span class="op">(</span><span class="va">pipeline</span><span class="op">)</span></span>
 <span><span class="co">#&gt; <span style="color: #949494;"># A tibble: 2 × 3</span></span></span>

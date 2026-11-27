@@ -5,17 +5,13 @@ all share the same C++ calling convention –
 `left_key_idx`/`right_key_idx`/ `right_drop_idx`/`nulls_equal` – and
 their GPU entry points
 (`gpu_left_join()`/`gpu_inner_join()`/`gpu_full_join()`/`gpu_right_join()`,
-`src/ops_join.cpp`) all return `list(ptr, diag)` (Phase 7 J4's
-map-pipeline restructure): `ptr` is the result table's external pointer,
-`diag` is a first-offender diagnostics list consumed by
+`src/ops_join.cpp`) all return `list(ptr, diag)`: `ptr` is the result
+table's external pointer, `diag` is a first-offender diagnostics list
+consumed by
 [`check_join_cardinality()`](https://bbtheo.github.io/cuplyr/reference/check_join_cardinality.md)
-below (multiple=/unmatched=/relationship=, Phase 7 J5).
-[`right_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html)
-used to be lowered via a swapped `left_join(y, x)` plus a column
-reorder/select (`build_right_join_via_left()`/
-`resolve_right_join_select_idx()`, since removed) – `gpu_right_join()`
-is now native and takes exactly the same argument shape as the other
-three, so no special-casing is needed here beyond the switch itself.
+below (multiple=/unmatched=/relationship=). `gpu_right_join()` is native
+and takes exactly the same argument shape as the other three, so no
+special-casing is needed here beyond the switch itself.
 
 ## Usage
 
@@ -26,9 +22,9 @@ lower_join(ast, source_ptr)
 ## Details
 
 Non-equi
-[`join_by()`](https://dplyr.tidyverse.org/reference/join_by.html) (Phase
-7 J7, `scratchpad/phase7_joins_design.md` section 1.4/2): `ast$by$op`
-carries each condition's real operator (not just `"=="`) whenever
+[`join_by()`](https://dplyr.tidyverse.org/reference/join_by.html):
+`ast$by$op` carries each condition's real operator (not just `"=="`)
+whenever
 [`join_by_natively_supported()`](https://bbtheo.github.io/cuplyr/reference/join_by_natively_supported.md)
 (R/join.R) let the join reach this AST shape at all –
 [`join_equi_spec()`](https://bbtheo.github.io/cuplyr/reference/join_equi_spec.md)/[`join_cond_spec()`](https://bbtheo.github.io/cuplyr/reference/join_cond_spec.md)

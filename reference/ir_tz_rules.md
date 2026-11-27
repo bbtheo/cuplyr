@@ -1,4 +1,4 @@
-# How each POSIXct-valued op gets its zone (F32)
+# How each POSIXct-valued op gets its zone
 
 Verified against dplyr 1.2 / vctrs 0.7 on plain tibbles, for local,
 absent, UTC and New York operands:
@@ -27,8 +27,8 @@ A named list of op names per rule
   [`first()`](https://dplyr.tidyverse.org/reference/nth.html)/[`last()`](https://dplyr.tidyverse.org/reference/nth.html)/[`nth()`](https://dplyr.tidyverse.org/reference/nth.html),
   [`min()`](https://rdrr.io/r/base/Extremes.html)/
   [`max()`](https://rdrr.io/r/base/Extremes.html),
-  [`mean()`](https://rdrr.io/r/base/mean.html)/[`median()`](https://rdrr.io/r/stats/median.html)
-  (F41), and cuplyr's
+  [`mean()`](https://rdrr.io/r/base/mean.html)/[`median()`](https://rdrr.io/r/stats/median.html),
+  and cuplyr's
   [`roll_min()`](https://bbtheo.github.io/cuplyr/reference/roll.md)/[`roll_max()`](https://bbtheo.github.io/cuplyr/reference/roll.md).
 
 - `common`: vctrs' common type of the value operands in order
@@ -43,12 +43,11 @@ A named list of op names per rule
 - `as_posixct`: a POSIXct keeps its zone as is, a Date becomes UTC
   midnight (R's `as.POSIXct.Date`).
 
-- `shift` (F46): `ts_add_us`/`ts_sub_us` keep `x`'s zone attribute as is
-  (an absent one stays absent).
+- `shift`: `ts_add_us`/`ts_sub_us` keep `x`'s zone attribute as is (an
+  absent one stays absent).
 
-- `round_date` (F46): `round_date()` of a local or absent zone returns
-  the session zone's name; floor_date()/ceiling_date() (in `x`) keep
-  `""`.
+- `round_date`: `round_date()` of a local or absent zone returns the
+  session zone's name; floor_date()/ceiling_date() (in `x`) keep `""`.
 
 Not listed, so CPU: unary `-`,
 [`abs()`](https://rdrr.io/r/base/MathFun.html),

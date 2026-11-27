@@ -4,16 +4,16 @@ else that isn't resolvable from env alone) raises an ordinary R
 error, caught here and reported as &quot;not a constant&quot; (ok = FALSE)
 rather than propagating – the same &quot;no data mask&quot; trick
 resolve_slice_dots() (R/slice.R) already relies on to distinguish
-plain R values from column references. An integer64 value is ok = FALSE
-(F96), and so, unevaluated, is a call that reaches the data mask by name
-(F79, expr_reaches_mask())."><meta property="og:description" content="No data mask is supplied, so a genuine column reference (or anything
+plain R values from column references. An integer64 value is ok = FALSE,
+and so, unevaluated, is a call that reaches the data mask by name
+(expr_reaches_mask())."><meta property="og:description" content="No data mask is supplied, so a genuine column reference (or anything
 else that isn't resolvable from env alone) raises an ordinary R
 error, caught here and reported as &quot;not a constant&quot; (ok = FALSE)
 rather than propagating – the same &quot;no data mask&quot; trick
 resolve_slice_dots() (R/slice.R) already relies on to distinguish
-plain R values from column references. An integer64 value is ok = FALSE
-(F96), and so, unevaluated, is a call that reaches the data mask by name
-(F79, expr_reaches_mask())."><meta property="og:image" content="https://bbtheo.github.io/cuplyr/logo.png"></head><body>
+plain R values from column references. An integer64 value is ok = FALSE,
+and so, unevaluated, is a call that reaches the data mask by name
+(expr_reaches_mask())."><meta property="og:image" content="https://bbtheo.github.io/cuplyr/logo.png"></head><body>
     <a href="#main" class="visually-hidden-focusable">Skip to contents</a>
 
 
@@ -21,7 +21,7 @@ plain R values from column references. An integer64 value is ok = FALSE
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -60,9 +60,9 @@ else that isn't resolvable from <code>env</code> alone) raises an ordinary R
 error, caught here and reported as "not a constant" (<code>ok = FALSE</code>)
 rather than propagating – the same "no data mask" trick
 <code>resolve_slice_dots()</code> (<code>R/slice.R</code>) already relies on to distinguish
-plain R values from column references. An integer64 value is <code>ok = FALSE</code>
-(F96), and so, unevaluated, is a call that reaches the data mask by name
-(F79, <code>expr_reaches_mask()</code>).</p>
+plain R values from column references. An integer64 value is <code>ok = FALSE</code>,
+and so, unevaluated, is a call that reaches the data mask by name
+(<code>expr_reaches_mask()</code>).</p>
     </div>
 
     <div class="section level2">

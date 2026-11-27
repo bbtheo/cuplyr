@@ -18,5 +18,12 @@ among its arguments.
 ## Usage
 
 ``` r
-ir_is_group_scalar(node)
+ir_is_group_scalar(node, post = FALSE)
 ```
+
+## Arguments
+
+- post:
+
+  Also count the aggregate temp columns of a summarise() post step
+  (ir_with_post_agg_cols()) as one-value.

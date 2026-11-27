@@ -6,9 +6,9 @@ The one place verbs that end with no columns
 `[`,
 [`distinct()`](https://dplyr.tidyverse.org/reference/distinct.html))
 build their result: an ungrouped zero-column `tbl_gpu` of `n` rows in
-the input's exec_mode. `n` defaults to the input's row count; pending
-lazy operations are computed first to get it (a materialization point,
-as for
+the input's exec_mode (rowwise, with no vars, for a rowwise input). `n`
+defaults to the input's row count; pending lazy operations are computed
+first to get it (a materialization point, as for
 [`summarise()`](https://dplyr.tidyverse.org/reference/summarise.html)
 with no expressions).
 

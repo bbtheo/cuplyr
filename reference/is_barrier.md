@@ -42,14 +42,13 @@ above: the simplest safe choice for a schema-only rename, avoiding the
 need to translate column references through its name map for anything
 pushed across it.
 
-`window` (`scratchpad/phase5_window_design.md` section 2.1) is a
-barrier: every window spec's result depends on the FULL row set (which
-rows exist) and the current row order (frames are built from a stable
-sort of group+order columns) – nothing may be pushed across it, the same
-reasoning as `arrange`/`slice`.
+`window` is a barrier: every window spec's result depends on the FULL
+row set (which rows exist) and the current row order (frames are built
+from a stable sort of group+order columns) – nothing may be pushed
+across it, the same reasoning as `arrange`/`slice`.
 
-Phase 12 audit note: barrier classification only matters for node TYPES
-that actually appear in an AST at all.
+Barrier classification only matters for node TYPES that actually appear
+in an AST at all.
 [`do()`](https://dplyr.tidyverse.org/reference/do.html)/[`rows_insert()`](https://dplyr.tidyverse.org/reference/rows.html)/
 [`rows_append()`](https://dplyr.tidyverse.org/reference/rows.html)/[`rows_update()`](https://dplyr.tidyverse.org/reference/rows.html)/[`rows_patch()`](https://dplyr.tidyverse.org/reference/rows.html)/[`rows_upsert()`](https://dplyr.tidyverse.org/reference/rows.html)/
 [`rows_delete()`](https://dplyr.tidyverse.org/reference/rows.html), and

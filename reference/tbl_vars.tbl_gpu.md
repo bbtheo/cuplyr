@@ -47,8 +47,8 @@ case, R/count.R). Before this method existed,
 since `tbl_gpu` isn't a data.frame subclass).
 
 [`dplyr::tbl_nongroup_vars()`](https://dplyr.tidyverse.org/reference/tbl_vars.html)
-(Phase 9, task 1) is a plain, non-generic function defined purely in
-terms of `setdiff(tbl_vars(x), group_vars(x))` – it works transparently
-for `tbl_gpu` via this method plus
+is a plain, non-generic function defined purely in terms of
+`setdiff(tbl_vars(x), group_vars(x))` – it works transparently for
+`tbl_gpu` via this method plus
 [`group_vars.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/group_vars.tbl_gpu.md),
 with no `tbl_gpu`-specific code of its own.

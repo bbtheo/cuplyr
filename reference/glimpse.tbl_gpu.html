@@ -11,7 +11,7 @@ few values – similar to dplyr::glimpse()."><meta property="og:image" content="
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -81,17 +81,17 @@ nothing to re-upload.</p>
     </div>
     <div class="section level2">
     <h2 id="details">Details<a class="anchor" aria-label="anchor" href="#details"></a></h2>
-    <p>Unlike the (now-removed) Phase 2 CPU-fallback <code><a href="https://pillar.r-lib.org/reference/glimpse.html" class="external-link">glimpse()</a></code>, this
-implementation never collects the whole table to R: any pending lazy
-operations are materialized (via <code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">compute()</a></code>), but the actual preview data comes
-from a small, capped row sample (like <code>print.tbl_gpu()</code>), and row/column
-counts/types come from lightweight metadata calls – never a full
-<code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collect()</a></code>.</p>
+    <p><code><a href="https://pillar.r-lib.org/reference/glimpse.html" class="external-link">glimpse()</a></code> never collects the whole table to R. The preview values come
+from a small sample of the first rows, copied from the GPU as
+<code>print.tbl_gpu()</code> does, and the row and column counts and types come from
+the table's metadata.</p>
 <p>A lazy table with pending operations runs its plan once for the preview
 (the result is freed when <code><a href="https://pillar.r-lib.org/reference/glimpse.html" class="external-link">glimpse()</a></code> returns; the table itself is
 unchanged), and one extra line starting <code>Lazy:</code> follows <code>Columns:</code>. If the
 plan fails (an error, out of GPU memory), <code><a href="https://pillar.r-lib.org/reference/glimpse.html" class="external-link">glimpse()</a></code> prints <code>Rows: ??</code>, the
-<code>Lazy:</code> line, the message and the stored schema instead of raising.</p>
+<code>Lazy:</code> line, the message and the stored schema instead of raising. A plan
+over a parquet file that does more than select or rename columns is not
+run for the preview.</p>
 <p>Column value/type formatting does not attempt to reproduce dplyr's own
 <code><a href="https://pillar.r-lib.org/reference/glimpse.html" class="external-link">glimpse()</a></code> output (which is formatted via <code>pillar</code>) byte-for-byte –
 only the structural facts (row count, column count, grouping, column

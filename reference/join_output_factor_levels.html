@@ -4,20 +4,18 @@ column's post-suffix NAME and which side's SOURCE column it came from
 (origin/source_names, parallel to names) – this reattaches
 factor_levels, keyed by that post-suffix output name, by looking up
 each output column's own origin schema's factor_levels under its
-PRE-suffix source name. This is the Bug 1 fix (Phase 11 L2): before this,
-build_join_schema() returned only names/types, so every mutating
-join (left_join()/inner_join()/full_join()/right_join(), and
-cross_join()) silently dropped factor metadata entirely – collect()
-would then present a factor column as raw integer codes."><meta property="og:description" content="build_join_schema()/build_join_output_info() compute each output
+pre-suffix source name. Without it, build_join_schema() returns only
+names/types, so every mutating join (left_join()/inner_join()/
+full_join()/right_join(), and cross_join()) would drop the factor
+metadata and collect() would show a factor column as raw integer codes."><meta property="og:description" content="build_join_schema()/build_join_output_info() compute each output
 column's post-suffix NAME and which side's SOURCE column it came from
 (origin/source_names, parallel to names) – this reattaches
 factor_levels, keyed by that post-suffix output name, by looking up
 each output column's own origin schema's factor_levels under its
-PRE-suffix source name. This is the Bug 1 fix (Phase 11 L2): before this,
-build_join_schema() returned only names/types, so every mutating
-join (left_join()/inner_join()/full_join()/right_join(), and
-cross_join()) silently dropped factor metadata entirely – collect()
-would then present a factor column as raw integer codes."><meta property="og:image" content="https://bbtheo.github.io/cuplyr/logo.png"></head><body>
+pre-suffix source name. Without it, build_join_schema() returns only
+names/types, so every mutating join (left_join()/inner_join()/
+full_join()/right_join(), and cross_join()) would drop the factor
+metadata and collect() would show a factor column as raw integer codes."><meta property="og:image" content="https://bbtheo.github.io/cuplyr/logo.png"></head><body>
     <a href="#main" class="visually-hidden-focusable">Skip to contents</a>
 
 
@@ -25,7 +23,7 @@ would then present a factor column as raw integer codes."><meta property="og:ima
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -64,11 +62,10 @@ column's post-suffix NAME and which side's SOURCE column it came from
 (<code>origin</code>/<code>source_names</code>, parallel to <code>names</code>) – this reattaches
 <code>factor_levels</code>, keyed by that post-suffix output name, by looking up
 each output column's own origin schema's <code>factor_levels</code> under its
-PRE-suffix source name. This is the Bug 1 fix (Phase 11 L2): before this,
-<code>build_join_schema()</code> returned only <code>names</code>/<code>types</code>, so every mutating
-join (<code><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">left_join()</a></code>/<code><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">inner_join()</a></code>/<code><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">full_join()</a></code>/<code><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">right_join()</a></code>, and
-<code><a href="https://dplyr.tidyverse.org/reference/cross_join.html" class="external-link">cross_join()</a></code>) silently dropped factor metadata entirely – <code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collect()</a></code>
-would then present a factor column as raw integer codes.</p>
+pre-suffix source name. Without it, <code>build_join_schema()</code> returns only
+<code>names</code>/<code>types</code>, so every mutating join (<code><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">left_join()</a></code>/<code><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">inner_join()</a></code>/
+<code><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">full_join()</a></code>/<code><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">right_join()</a></code>, and <code><a href="https://dplyr.tidyverse.org/reference/cross_join.html" class="external-link">cross_join()</a></code>) would drop the factor
+metadata and <code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collect()</a></code> would show a factor column as raw integer codes.</p>
     </div>
 
     <div class="section level2">

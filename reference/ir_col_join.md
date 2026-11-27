@@ -1,4 +1,4 @@
-# Create a side-tagged IR column reference for a non-equi `join_by()` condition (Phase 7 J7)
+# Create a side-tagged IR column reference for a non-equi `join_by()` condition
 
 A plain
 [`ir_col()`](https://bbtheo.github.io/cuplyr/reference/ir_col.md) node
@@ -19,9 +19,9 @@ own roxygen, R/join.R).
 [`join_cond_ir_from_spec()`](https://bbtheo.github.io/cuplyr/reference/join_cond_ir_from_spec.md)
 (R/join.R) uses that knowledge directly when building each condition's
 IR, tagging every `col` node with an explicit `side` (`0L` = left/x,
-`1L` = right/y) at construction time – deliberately NOT the design doc's
-original "resolve left-first-then-right by lookup order" sketch, which
-silently breaks on a self-join.
+`1L` = right/y) at construction time, rather than resolving a name
+left-first-then-right by lookup order, which silently breaks on a
+self-join.
 [`ir_bind_join()`](https://bbtheo.github.io/cuplyr/reference/ir_bind_join.md)
 then resolves `$index` against the correct side's schema using this tag,
 never by cross-schema lookup.

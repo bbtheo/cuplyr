@@ -9,7 +9,7 @@ operations are performed on the GPU. For other objects, delegates to dplyr."><me
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -77,7 +77,10 @@ becomes one column named by its argument name. <code>NULL</code>s are dropped.</
     <div class="section level2">
     <h2 id="details">Details<a class="anchor" aria-label="anchor" href="#details"></a></h2>
     <p>If any input (including one inside a list) is a <code>tbl_gpu</code>, the result is a
-<code>tbl_gpu</code>, wherever the <code>tbl_gpu</code> sits in the arguments. <code><a href="https://dplyr.tidyverse.org/reference/bind_cols.html" class="external-link">dplyr::bind_cols()</a></code>
+<code>tbl_gpu</code>, wherever the <code>tbl_gpu</code> sits in the arguments. The exception is a
+data frame input with a list or data frame column, which has no GPU form:
+then dplyr binds the inputs on the CPU and the result is its data frame,
+with the first input's class and groups. <code><a href="https://dplyr.tidyverse.org/reference/bind_cols.html" class="external-link">dplyr::bind_cols()</a></code>
 on a <code>tbl_gpu</code> input is handed to this function and gives the same result for the
 four <code>.name_repair</code> strings above; any other <code>.name_repair</code> (a <code>*_quiet</code>
 string, a function or a formula) is an error for a <code>tbl_gpu</code>.

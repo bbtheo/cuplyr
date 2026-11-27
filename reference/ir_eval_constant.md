@@ -5,9 +5,9 @@ else that isn't resolvable from `env` alone) raises an ordinary R error,
 caught here and reported as "not a constant" (`ok = FALSE`) rather than
 propagating – the same "no data mask" trick `resolve_slice_dots()`
 (`R/slice.R`) already relies on to distinguish plain R values from
-column references. An integer64 value is `ok = FALSE` (F96), and so,
-unevaluated, is a call that reaches the data mask by name (F79,
-`expr_reaches_mask()`).
+column references. An integer64 value is `ok = FALSE`, and so,
+unevaluated, is a call that reaches the data mask by name
+(`expr_reaches_mask()`).
 
 ## Usage
 

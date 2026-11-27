@@ -6,11 +6,10 @@ Recognizes a bare column name, `desc(column)`/`dplyr::desc(column)`, or
 also usable directly as an
 [`arrange()`](https://dplyr.tidyverse.org/reference/arrange.html)/[`order_by()`](https://dplyr.tidyverse.org/reference/order_by.html)
 sort key) and resolves it against `schema`. Anything else – a general
-expression such as `order_by(a + b, ...)` – is not implemented this wave
-(mirroring `R/window.R`'s rank-family design note: only a bare,
-already-existing column doubles as an order key so far, no
-`..winarg..`-style hoisting for order columns yet) and returns `NULL`,
-same as any other unsupported IR shape (callers fall back).
+expression such as `order_by(a + b, ...)` – is not supported (only a
+bare, already-existing column doubles as an order key; there is no
+`..winarg..`-style hoisting for order columns) and returns `NULL`, same
+as any other unsupported IR shape (callers fall back).
 
 ## Usage
 

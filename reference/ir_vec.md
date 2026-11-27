@@ -10,7 +10,7 @@ a mutate expression record.
 ## Usage
 
 ``` r
-ir_vec(value, type, quo, name)
+ir_vec(value, type, quo, name, loss = NULL)
 ```
 
 ## Arguments
@@ -31,6 +31,16 @@ ir_vec(value, type, quo, name)
 - name:
 
   Output column name
+
+- loss:
+
+  What the upload would change in a Date/POSIXct `value`
+  (`timestamp_vector_loss()`), or `NULL` (any other vector). The caller
+  that records it also warns for it when the call is made, so it is
+  marked `warned`:
+  [`lower_mutate()`](https://bbtheo.github.io/cuplyr/reference/lower_mutate.md)
+  mutes the upload's own warning for such a vector only (a plan would
+  repeat it at every run).
 
 ## Value
 

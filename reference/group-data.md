@@ -2,11 +2,9 @@
 
 [`group_data()`](https://dplyr.tidyverse.org/reference/group_data.html)
 (and the queries derived from it below) report the *grouping structure*
-dplyr's own `grouped_df` carries as an attribute – `cuplyr` computes it
-on demand via one native GPU groupby instead
-([`compute_group_data()`](https://bbtheo.github.io/cuplyr/reference/compute_group_data.md),
-above), since `tbl_gpu` has no such attribute to read. All are
-GPU-native (Phase 9, task 1) – previously CPU fallbacks.
+that dplyr's `grouped_df` carries as an attribute. A `tbl_gpu` has no
+such attribute, so `cuplyr` computes it on demand with one GPU groupby.
+All of them run on the GPU.
 
 ## Usage
 
@@ -45,10 +43,9 @@ n_groups(x)
 
 [`group_data()`](https://dplyr.tidyverse.org/reference/group_data.html)
 returns a tibble of the grouping columns (in ascending key order, `NA`
-sorted last – cudf's own default sort-groupby order, which is exactly
-dplyr's own convention, verified empirically) plus a `.rows` list-of
-column of 1-based row indices; called on an ungrouped table it returns a
-single row whose `.rows` holds every row, in original order.
+sorted last, as in dplyr) plus a `.rows` list-of column of 1-based row
+indices; called on an ungrouped table it returns a single row whose
+`.rows` holds every row, in original order.
 [`group_keys()`](https://dplyr.tidyverse.org/reference/group_data.html)
 is
 [`group_data()`](https://dplyr.tidyverse.org/reference/group_data.html)

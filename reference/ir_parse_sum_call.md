@@ -1,4 +1,4 @@
-# Parse `sum(x)` / `sum(x, na.rm = <literal>)` (Phase 5, task W9)
+# Parse `sum(x)` / `sum(x, na.rm = <literal>)`
 
 [`sum()`](https://rdrr.io/r/base/sum.html)'s ordinary registry entry
 (`arity = 1L`, agg-family window kind) only accepts the bare
@@ -11,12 +11,7 @@ function we don't control – `dplyr:::tally_n()`) UNCONDITIONALLY emits
 `base::sum(<wt>, na.rm = TRUE)` as its internal
 [`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html) dot,
 regardless of whether the weight column actually has any NAs – so this
-2-arg shape must parse too, or `add_tally(wt = )` hard-errors. (This is
-the Phase 5 task W9 fix-forward found while deleting
-`grouped_aggregate_mutate()`, which used to accept this exact shape via
-a real NA-excluding
-[`summarise()`](https://dplyr.tidyverse.org/reference/summarise.html)-then-join-back
-call.)
+2-arg shape must parse too, or `add_tally(wt = )` hard-errors.
 
 ## Usage
 

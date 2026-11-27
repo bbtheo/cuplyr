@@ -50,4 +50,8 @@ cuplyr_fallback_notify(
 
 ## Value
 
-`invisible(NULL)`
+The notice's fields (`verb`, `expr`, `reason`, `rows`, `cols`, `bytes`)
+as a list, invisibly: `verb` and `expr` as reported, after a verb built
+on another one reported as itself.
+[`gpu_fallback()`](https://bbtheo.github.io/cuplyr/reference/gpu_fallback.md)
+records them in the plan text (R/plan-text.R).

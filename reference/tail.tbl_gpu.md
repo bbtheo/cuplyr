@@ -4,9 +4,8 @@
 `tbl_gpu`. Keeps the same rows as
 [`utils::tail.data.frame()`](https://rdrr.io/r/utils/head.html):
 implemented as `slice_tail(n = ceiling(n))` on the ungrouped table (see
-[`slice_tail.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/slice_tail.tbl_gpu.md)
-for the native-vs-fallback dispatch), with the grouping put back on the
-result.
+[`slice_tail.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/slice_tail.tbl_gpu.md)),
+with the grouping put back on the result.
 
 ## Usage
 

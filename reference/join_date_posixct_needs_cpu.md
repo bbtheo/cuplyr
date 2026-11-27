@@ -1,4 +1,4 @@
-# Does a key pair unify a Date with a non-UTC POSIXct? (F32)
+# Does a key pair unify a Date with a non-UTC POSIXct?
 
 dplyr casts such a Date to local midnight of the POSIXct's zone
 (`vec_cast(<Date>, <POSIXct tz>)`), which moves with DST. The native

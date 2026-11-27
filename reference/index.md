@@ -6,7 +6,7 @@
   : Add a count column without collapsing rows
 
 - [`arrange(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/arrange.tbl_gpu.md)
-  : Arrange rows of a GPU table by column values
+  : Order rows using column values
 
 - [`as_eager()`](https://bbtheo.github.io/cuplyr/reference/as_eager.md)
   : Switch to eager execution mode
@@ -15,7 +15,6 @@
   Switch to lazy execution mode
 
 - [`as_tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/as_tbl_gpu.md)
-  [`as_gibble()`](https://bbtheo.github.io/cuplyr/reference/as_tbl_gpu.md)
   : Coerce to a GPU table
 
 - [`bind_cols()`](https://bbtheo.github.io/cuplyr/reference/bind_cols.md)
@@ -42,8 +41,7 @@
 - [`cross_join(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/cross_join.tbl_gpu.md)
   :
 
-  [`cross_join()`](https://dplyr.tidyverse.org/reference/cross_join.html):
-  native via `cudf::cross_join`
+  Cross join for `tbl_gpu`
 
 - [`cuplyr-fallback`](https://bbtheo.github.io/cuplyr/reference/cuplyr-fallback.md)
   : CPU fallbacks and plan breaks: what cuplyr tells you, and how to
@@ -71,16 +69,16 @@
   : Dimnames of a GPU table
 
 - [`distinct(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/distinct.tbl_gpu.md)
-  : Keep only distinct/unique rows of a GPU table
+  : Keep distinct rows
 
 - [`explain(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/explain.tbl_gpu.md)
   : Explain a tbl_gpu query
 
 - [`filter(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/filter.tbl_gpu.md)
-  : Filter rows of a GPU table
+  : Keep rows that match a condition
 
 - [`filter_out(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/filter_out.tbl_gpu.md)
-  : Drop rows of a GPU table where conditions are TRUE
+  : Drop rows that match a condition
 
 - [`glimpse(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/glimpse.tbl_gpu.md)
   : Get a glimpse of a GPU table's structure
@@ -142,11 +140,10 @@
   Check if a tbl_gpu uses lazy execution
 
 - [`is_tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/is_tbl_gpu.md)
-  [`is_gibble()`](https://bbtheo.github.io/cuplyr/reference/is_tbl_gpu.md)
   : Test if an object is a GPU table
 
 - [`mutate(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/mutate.tbl_gpu.md)
-  : Create or modify columns in a GPU table
+  : Create, modify and delete columns
 
 - [`left_join(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/mutating-joins.md)
   [`inner_join(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/mutating-joins.md)
@@ -214,8 +211,9 @@
   [`anti_join(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/semi-anti-joins.md)
   :
 
-  [`semi_join()`](https://dplyr.tidyverse.org/reference/filter-joins.html)/[`anti_join()`](https://dplyr.tidyverse.org/reference/filter-joins.html):
-  native via `cudf::filtered_join`
+  Filtering joins for `tbl_gpu`
+  ([`semi_join()`](https://dplyr.tidyverse.org/reference/filter-joins.html),
+  [`anti_join()`](https://dplyr.tidyverse.org/reference/filter-joins.html))
 
 - [`union(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/set-ops.md)
   [`union_all(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/set-ops.md)
@@ -231,7 +229,7 @@
   : Display GPU information
 
 - [`show_query(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/show_query.tbl_gpu.md)
-  : Show pending operations for a lazy tbl_gpu
+  : Show the plan of a lazy tbl_gpu
 
 - [`slice(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/slice.tbl_gpu.md)
   : Select rows by position
@@ -258,7 +256,7 @@
 
 - [`summarise(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/summarise.tbl_gpu.md)
   [`summarize(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/summarise.tbl_gpu.md)
-  : Summarise groups in a GPU table
+  : Summarise each group down to one row
 
 - [`tail(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/tail.tbl_gpu.md)
   : Last rows of a GPU table
@@ -279,9 +277,8 @@
   Base [`rbind()`](https://rdrr.io/r/base/cbind.html) /
   [`cbind()`](https://rdrr.io/r/base/cbind.html) for GPU tables
 
-- [`tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md)
-  [`gibble()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md) :
-  Create a GPU-backed data frame
+- [`tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md) :
+  Create a GPU table: a data frame in GPU memory
 
 - [`tbl_sum(`*`<tbl_gpu>`*`)`](https://bbtheo.github.io/cuplyr/reference/tbl_sum.tbl_gpu.md)
   : Summary header of a tbl_gpu (pillar)

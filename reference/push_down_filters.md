@@ -1,10 +1,9 @@
 # Push filters below mutates when predicates do not depend on mutate outputs
 
-Phase 12 audit –
-filter-pushdown-across-[`distinct()`](https://dplyr.tidyverse.org/reference/distinct.html)
-(flagged as a known, unimplemented opportunity back in section 3.1 of
-the design notes): `filter(distinct(df, k), k > 1)` COULD safely push
-the filter below
+Pushing a filter across
+[`distinct()`](https://dplyr.tidyverse.org/reference/distinct.html) is
+deliberately not implemented. `filter(distinct(df, k), k > 1)` COULD
+safely push the filter below
 [`distinct()`](https://dplyr.tidyverse.org/reference/distinct.html) when
 the predicate only references surviving key columns (or, when
 `.keep_all = TRUE`, any column at all) – a predicate that's a pure
@@ -53,6 +52,5 @@ the segment's bottom node specifically a single filter with
 only-key-column predicates"), not a `push_down_filters()` switch case –
 meaningfully more invasive than the analogous mutate/ select pushdown
 cases below, and with a real correctness footgun if the
-key-vs-non-key-column safety check is ever gotten wrong. Left for a
-future phase; the two-line summary above is the reason it isn't
-attempted now.
+key-vs-non-key-column safety check is ever gotten wrong. That risk is
+why it isn't attempted.

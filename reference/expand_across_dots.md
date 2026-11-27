@@ -57,7 +57,11 @@ an unnamed
 staged or not) or `"combined"` (an
 [`if_any()`](https://dplyr.tidyverse.org/reference/across.html)/[`if_all()`](https://dplyr.tidyverse.org/reference/across.html)
 dot). mutate()/transmute() use it to tell which original dot a value
-computed from the expanded dots belongs to.
+computed from the expanded dots belongs to. When an expansion names a
+column, `col` is the column each one stands for (a staged one's, not its
+temp's; an
+[`if_any()`](https://dplyr.tidyverse.org/reference/across.html)/[`if_all()`](https://dplyr.tidyverse.org/reference/across.html)'s
+first; `""` for a plain dot), which the errors name (#30).
 
 ## Details
 

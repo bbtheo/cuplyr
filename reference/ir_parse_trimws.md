@@ -1,4 +1,4 @@
-# Parse `trimws(x, which = "both", whitespace = "[ \\t\\r\\n]")` (Phase 11 L5)
+# Parse `trimws(x, which = "both", whitespace = "[ \\t\\r\\n]")`
 
 Only the default `whitespace=` (space/tab/CR/LF – cuDF `strip()`'s
 (`strings/strip.hpp`) own "empty `to_strip` means strip whitespace"

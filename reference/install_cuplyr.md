@@ -26,19 +26,19 @@ install_cuplyr(
 
   `"auto"`
 
-  :   Try methods in order: pixi, conda, system
+  : Try methods in order: pixi, conda, system
 
   `"pixi"`
 
-  :   Use pixi to manage a reproducible environment
+  : Use pixi to manage a reproducible environment
 
   `"conda"`
 
-  :   Use conda/mamba to install RAPIDS into a prefix
+  : Use conda/mamba to install RAPIDS into a prefix
 
   `"system"`
 
-  :   Assume CUDA and cuDF are already installed on the system
+  : Assume CUDA and cuDF are already installed on the system
 
 - repo:
 
@@ -88,7 +88,7 @@ Invisibly returns `TRUE` on success.
 **pixi**: Runs `pixi run install` which handles everything. Requires
 [pixi](https://pixi.sh) to be installed.
 
-**conda**: Installs RAPIDS 25.12 for CUDA 12, with the CUDA compiler and
+**conda**: Installs RAPIDS 26.10 for CUDA 13, with the CUDA compiler and
 headers, into a conda environment, then configures and builds cuplyr
 against it. Requires `mamba` or `conda`.
 

@@ -4,7 +4,7 @@ Returns `list(left, right, op, filter)`: four parallel character
 vectors, one entry per key/condition pair. `op` is each condition's
 operator (`"=="` for every key of a character/`NULL` `by`), `filter` its
 [`join_by()`](https://dplyr.tidyverse.org/reference/join_by.html)
-filter: `"none"`, or `"max"`/`"min"` for a `closest()` condition (F24).
+filter: `"none"`, or `"max"`/`"min"` for a `closest()` condition.
 Callers run
 [`join_by_natively_supported()`](https://bbtheo.github.io/cuplyr/reference/join_by_natively_supported.md)
 first, so a

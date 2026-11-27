@@ -1,4 +1,4 @@
-# Lower a `by = character()` join (gap A4)
+# Lower a `by = character()` join
 
 dplyr runs its ordinary join machinery with a constant key
 (`join_rows(cross = TRUE)`), so every x row matches every y row. That is

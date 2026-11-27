@@ -56,7 +56,9 @@ If no GPU is available, returns
 The compute capability indicates the GPU architecture and supported
 features:
 
-- 7.x - Volta/Turing (V100, RTX 20 series)
+- 7.0 - Volta (V100): not supported (CUDA 13 has no Volta code)
+
+- 7.5 - Turing (T4, RTX 20 series): the oldest supported
 
 - 8.x - Ampere (A100, RTX 30 series)
 

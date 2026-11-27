@@ -21,9 +21,9 @@ optimize_segment(ast, required_cols = NULL, keep_mutates = FALSE)
 
 - keep_mutates:
 
-  `TRUE` when `required_cols` is a barrier's narrower requirement (F99):
-  that pruning removes columns only, so a mutate expression nothing
-  reads stays and is computed (it can warn, as in dplyr), and
+  `TRUE` when `required_cols` is a barrier's narrower requirement: that
+  pruning removes columns only, so a mutate expression nothing reads
+  stays and is computed (it can warn, as in dplyr), and
   [`prune_dead_columns()`](https://bbtheo.github.io/cuplyr/reference/prune_dead_columns.md)
   does not run. Its inputs stay required
   ([`push_down_projections()`](https://bbtheo.github.io/cuplyr/reference/push_down_projections.md)

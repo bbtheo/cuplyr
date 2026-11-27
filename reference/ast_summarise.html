@@ -7,7 +7,7 @@
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -52,7 +52,7 @@
 <span>  <span class="va">groups</span>,</span>
 <span>  result_groups <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/character.html" class="external-link">character</a></span><span class="op">(</span><span class="op">)</span>,</span>
 <span>  on_sum_overflow <span class="op">=</span> <span class="st">"error"</span>,</span>
-<span>  sort_groups <span class="op">=</span> <span class="cn">TRUE</span></span>
+<span>  group_order <span class="op">=</span> <span class="st">"keys"</span></span>
 <span><span class="op">)</span></span></code></pre></div>
     </div>
 
@@ -76,27 +76,27 @@ set, regardless of <code>.groups=</code>)</p></dd>
 
 <dt id="arg-result-groups">result_groups<a class="anchor" aria-label="anchor" href="#arg-result-groups"></a></dt>
 <dd><p>Character vector of group columns RETAINED on the
-summarise's <em>output</em> (Phase 6, task 3): a subset of <code>groups</code>, computed
+summarise's <em>output</em>: a subset of <code>groups</code>, computed
 from <code>.groups=</code> semantics by <code>resolve_summarise_groups()</code>
 (R/summarise.R) – <code><a href="https://rdrr.io/r/base/character.html" class="external-link">character()</a></code> for <code>.groups = "drop"</code>/ungrouped
 input, all of <code>groups</code> for <code>"keep"</code>, all-but-the-last for the default/
-<code>"drop_last"</code>. Read by <code><a href="propagate_groups.html">propagate_groups()</a></code> (R/execute.R) instead of
-the old hardcoded "summarise always drops all groups" rule.</p></dd>
+<code>"drop_last"</code>. Read by <code><a href="propagate_groups.html">propagate_groups()</a></code> (R/execute.R).</p></dd>
 
 
 <dt id="arg-on-sum-overflow">on_sum_overflow<a class="anchor" aria-label="anchor" href="#arg-on-sum-overflow"></a></dt>
-<dd><p>(F34) What to do when an integer/logical <code><a href="https://rdrr.io/r/base/sum.html" class="external-link">sum()</a></code>
+<dd><p>What to do when an integer/logical <code><a href="https://rdrr.io/r/base/sum.html" class="external-link">sum()</a></code>
 leaves R's integer range at execution. <code>"double"</code>: the column comes back
 FLOAT64, as in dplyr (eager mode reconciles the schema from the result).
 <code>"error"</code> (lazy plans, whose schema was declared INT32 statically): raise
 <code>cuplyr_error_sum_overflow</code>. A lazy <code><a href="https://dplyr.tidyverse.org/reference/summarise.html" class="external-link">summarise()</a></code> plans only a sum of a
-logical this way (F80): an INT32 sum runs at the verb with <code>"double"</code>.</p></dd>
+logical this way: an INT32 sum runs at the verb with <code>"double"</code>.</p></dd>
 
 
-<dt id="arg-sort-groups">sort_groups<a class="anchor" aria-label="anchor" href="#arg-sort-groups"></a></dt>
-<dd><p>(F33) Sort the grouped result by the group keys
-(ascending, <code>NA</code> last), dplyr's <code><a href="https://dplyr.tidyverse.org/reference/group_by.html" class="external-link">group_by()</a></code> order. <code>FALSE</code> only for
-<code>summarise_by_desugar()</code>, which re-sorts by first appearance anyway.</p></dd>
+<dt id="arg-group-order">group_order<a class="anchor" aria-label="anchor" href="#arg-group-order"></a></dt>
+<dd><p>Row order of a grouped result: <code>"keys"</code> sorts by the
+group keys (ascending, <code>NA</code> last), dplyr's <code><a href="https://dplyr.tidyverse.org/reference/group_by.html" class="external-link">group_by()</a></code> order; <code>"first"</code>
+(#50) orders groups by first appearance, dplyr's <code>.by =</code> order, and is
+what <code>summarise_by_desugar()</code> asks for.</p></dd>
 
 </dl></div>
     <div class="section level2">

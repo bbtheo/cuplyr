@@ -1,12 +1,11 @@
 # Mutating joins for `tbl_gpu` (`left_join()`, `inner_join()`, `full_join()`, `right_join()`)
 
-GPU-native equi and non-equi joins mirroring
-[`dplyr::left_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html)'s
-own `by=`/`keep=`/`na_matches=`/`multiple=`/`unmatched=`/`relationship=`
-semantics (Phase 7). Row order, key coalescing, suffixing, and every
-cardinality check reproduce dplyr's own contract exactly – see "Details"
-below for what runs natively on the GPU versus what transparently falls
-back to CPU (`dplyr`) evaluation.
+Equi and non-equi joins on the GPU, with dplyr's `by=`/`keep=`/
+`na_matches=`/`multiple=`/`unmatched=`/`relationship=` semantics. Row
+order, key coalescing, suffixing and every cardinality check follow
+[`dplyr::left_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html)
+and friends. See "Details" for what runs on the GPU and what runs in
+dplyr on the CPU.
 
 ## Usage
 
@@ -92,18 +91,15 @@ right_join(
   `by = character()` (deprecated in dplyr 1.1.0, warns once) is a cross
   join with the usual `multiple=`/`relationship=`/ `unmatched=` rules.
   [`join_by()`](https://dplyr.tidyverse.org/reference/join_by.html)
-  supports both equi conditions (`a`, `a == b`) and non-equi conditions
-  (`>=`, `>`, `<=`, `<`, and the
+  conditions run on the GPU: equality (`a`, `a == b`), inequality (`>=`,
+  `>`, `<=`, `<`, and the
   [`between()`](https://dplyr.tidyverse.org/reference/between.html)/[`within()`](https://rdrr.io/r/base/with.html)/`overlaps()`
-  helpers that pre-expand to pairs of them) – all GPU-native (Phase 7
-  J6/J7). A `closest()` rolling condition (one per call, next to any
-  number of `==` conditions) and non-equi conditions comparing two
-  `STRING` columns are GPU-native too (F24). Two `closest()` conditions,
-  `closest()` next to another inequality, and
-  factor/logical/Date-vs-POSIXct rolling keys transparently fall back to
-  CPU evaluation (a `cuplyr.fallback` notification fires; see
-  `options(cuplyr.fallback = )`), still with a result that matches
-  `dplyr` exactly.
+  helpers built from them), one `closest()` rolling condition next to
+  any number of `==` conditions, and inequalities between two string
+  columns. Two `closest()` conditions, `closest()` next to another
+  inequality, and factor/logical/Date-vs-POSIXct rolling keys run in
+  dplyr on the CPU (see `options(cuplyr.fallback = )` to be told), with
+  the same result as dplyr.
 
 - copy:
 
@@ -113,15 +109,12 @@ right_join(
 - suffix:
 
   Length-2 character vector used to disambiguate colliding non-key
-  column names (default `c(".x", ".y")`). Ported from
-  `dplyr:::add_suffixes()`: an already-taken suffixed name gets suffixed
-  again (`val.y.y`) rather than silently colliding. `suffix = c("", "")`
-  (or any element set to `""`) that still collides with a genuine
-  duplicate name reproduces dplyr's name-keyed column-overwrite
-  semantics via a CPU fallback – this package's fixed-column-count
-  gather has no native way to express "the right column's data silently
-  replaces the left's, and the output has one fewer column than the
-  naive merge".
+  column names (default `c(".x", ".y")`). As in dplyr, an already-taken
+  suffixed name gets suffixed again (`val.y.y`) rather than silently
+  colliding. A `suffix` with an empty element (`c("", "")`) that still
+  leaves two columns with the same name runs in dplyr on the CPU, which
+  gives dplyr's result (the right column replaces the left one, and the
+  output has one column fewer).
 
 - ...:
 
@@ -130,40 +123,37 @@ right_join(
 - keep:
 
   Whether to keep both sides' join key columns in the output. `NULL`
-  (the default) resolves *per condition*, exactly like
-  `dplyr:::join_cols()`: an equi condition's key columns coalesce to one
-  (the right-side copy is dropped), while a non-equi condition's columns
-  are always kept on both sides (there is no single "coalesced" value
-  for an inequality). Explicit `keep = FALSE` is only legal when every
-  condition is equi (errors with dplyr's own text otherwise); explicit
-  `keep = TRUE` keeps and suffixes every column on both sides uniformly.
+  (the default) resolves per condition, as in dplyr: an equi condition's
+  key columns coalesce to one (the right-side copy is dropped), while a
+  non-equi condition's columns are always kept on both sides (there is
+  no single coalesced value for an inequality). Explicit `keep = FALSE`
+  is only allowed when every condition is equi (otherwise it is dplyr's
+  error); explicit `keep = TRUE` keeps and suffixes every key column on
+  both sides.
 
 - na_matches:
 
   `"na"` (default): an `NA` key matches another `NA` key, like
   [`base::merge()`](https://rdrr.io/r/base/merge.html). `"never"`: `NA`
-  keys never match anything, including another `NA`
-  (`cudf::null_equality::UNEQUAL` on the GPU).
+  keys never match anything, including another `NA`.
 
 - multiple:
 
   How to resolve a left/right row matching more than one row on the
   other side: `"all"` (default, every match kept), `"any"`, `"first"`,
-  or `"last"` (the undocumented `"error"` and `"warning"` run on the CPU
-  fallback). Filtering runs device-side against the already-sorted join
-  maps (Phase 7 J5) – `"all"`, the default used by every performance
-  benchmark, costs nothing extra. Under right/full joins a y row that no
-  kept pair uses is listed once as unmatched.
+  or `"last"`, all on the GPU (the undocumented `"error"` and
+  `"warning"` run in dplyr on the CPU). The default `"all"` costs
+  nothing extra. Under right/full joins a y row that no kept pair uses
+  is listed once as unmatched.
 
 - unmatched:
 
   How to handle rows with no match: `"drop"` (default) or `"error"`
-  (raises dplyr's exact `dplyr_error_join_matches_nothing`/
+  (raises dplyr's `dplyr_error_join_matches_nothing`/
   `dplyr_error_join_matches_remaining` conditions, including the
   offending row number).
   [`full_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html)
-  has no `unmatched=` parameter at all, matching dplyr's own signature
-  (it never drops a row).
+  has no `unmatched=` parameter, as in dplyr (it never drops a row).
 
 - relationship:
 
@@ -172,14 +162,9 @@ right_join(
   duplicate, for equality joins called directly; never for
   inequality/overlap joins or indirect calls, as in dplyr),
   `"one-to-one"`, `"one-to-many"`, `"many-to-one"`, or `"many-to-many"`
-  (silences the advisory warning). A violation raises dplyr's exact
-  `dplyr_error_join_relationship_*` condition, including the class
-  vector and first-offending-row bullet. Known limitation: with the
-  default `relationship`, a lazy pipeline whose
-  [`filter()`](https://dplyr.tidyverse.org/reference/filter.html) the
-  optimizer pushes below the join may not emit the advisory many-to-many
-  warning, or may report different row numbers in it (the rows returned
-  are identical).
+  (silences the advisory warning). A violation raises dplyr's
+  `dplyr_error_join_relationship_*` condition, with its class vector and
+  first-offending-row bullet.
 
 ## Value
 
@@ -191,48 +176,50 @@ unmatched `y` rows appended last.
 
 ## Details
 
-### GPU-native coverage (Phase 7)
+### On the GPU
 
 - Equi joins (`join_by(a)`, `by = "col"`, `by = c(a = "b")`): a hash
-  join
-  (`cudf::inner_join()`/[`left_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html)/[`full_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html)),
-  stable-sorted to reproduce dplyr's row order (Phase 7 J1/J4/J6).
+  join, with the rows put in dplyr's order.
 
-- Non-equi/mixed
+- Non-equi and mixed
   [`join_by()`](https://dplyr.tidyverse.org/reference/join_by.html)
   conditions (`>=`, `>`, `<=`, `<`, and their
   [`between()`](https://dplyr.tidyverse.org/reference/between.html)/[`within()`](https://rdrr.io/r/base/with.html)/`overlaps()`
-  derivations): `cudf::mixed_join()` when at least one equi condition is
-  present, `cudf::conditional_join()` otherwise (Phase 7 J7).
+  forms).
 
-- `na_matches=`, `multiple=`, `unmatched=`, `relationship=` are fully
-  GPU-native/checked, with dplyr's exact condition classes and message
-  text (Phase 7 J1/J5).
+- `na_matches=`, `multiple=`, `unmatched=` and `relationship=`, with
+  dplyr's condition classes and message text.
 
-- `join_by(closest(...))` rolling joins (F24): exactly one `closest()`
+- `join_by(closest(...))` rolling joins: exactly one `closest()`
   condition (`>=`, `>`, `<=`, `<`) plus `==` conditions, on integer,
-  double, Date or POSIXct (or `STRING`) rolling keys: y is sorted by
-  (equi keys, rolling key) and each x row finds its closest rows by
-  binary search (`gpu_rolling_join()`), so a rolling join never
-  materialises the inequality join. Every y row tied at the closest
-  value is returned, and `multiple=`/`unmatched=`/`relationship=` act on
-  those matches, as in dplyr.
+  double, Date, POSIXct or string rolling keys. Each row of `x` finds
+  its closest rows of `y` without building the whole inequality join.
+  Every y row tied at the closest value is returned, and
+  `multiple=`/`unmatched=`/`relationship=` act on those matches, as in
+  dplyr.
 
-- A non-equi condition comparing two `STRING` columns (F24): both sides
-  are replaced by INT32 codes of one shared bytewise (C-locale) order
-  before the AST evaluator runs.
+- A non-equi condition comparing two string columns: strings compare in
+  byte (C locale) order.
 
-### Falls back to CPU (transparent, notified)
+### In dplyr on the CPU
+
+These, among others, run in dplyr and the result comes back to the GPU
+(with a notice under `options(cuplyr.fallback = "warn")`):
 
 - Two `closest()` conditions, `closest()` next to another inequality,
   and rolling keys that are factors, logicals or a Date against a
   POSIXct.
 
-- A non-equi condition comparing a `STRING` with a non-`STRING` column.
+- A non-equi condition comparing a string with a non-string column.
+
+- Factor keys whose levels differ between `x` and `y`.
+
+- A `Date` key joined to a `POSIXct` key in a zone other than UTC (dplyr
+  compares the date as local midnight of that zone).
 
 - `suffix = c("", ...)` when it would still produce a genuine duplicate
   output column name.
 
 - [`nest_join()`](https://dplyr.tidyverse.org/reference/nest_join.html)
-  stays CPU-only entirely (needs list-column support, Phase 11) – it is
-  not one of the four verbs documented here.
+  (not one of the four verbs documented here) always runs on the CPU:
+  its result holds a list column, which a GPU table can't hold.

@@ -30,7 +30,11 @@ Combined data frame or tbl_gpu
 ## Details
 
 If any input (including one inside a list) is a `tbl_gpu`, the result is
-a `tbl_gpu`, wherever the `tbl_gpu` sits in the arguments.
+a `tbl_gpu`, wherever the `tbl_gpu` sits in the arguments. The exception
+is a data frame input with a list or data frame column, which has no GPU
+form: then dplyr binds the inputs on the CPU and the result is its data
+frame, with the first input's class and groups and the `.id` column. A
+matrix column with more than one column raises an error that names it.
 [`dplyr::bind_rows()`](https://dplyr.tidyverse.org/reference/bind_rows.html)
 and
 [`purrr::map_dfr()`](https://purrr.tidyverse.org/reference/map_dfr.html)

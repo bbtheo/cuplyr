@@ -74,6 +74,7 @@ Anything else runs dplyr's
 [`reframe()`](https://dplyr.tidyverse.org/reference/reframe.html) on the
 CPU (see
 [cuplyr-fallback](https://bbtheo.github.io/cuplyr/reference/cuplyr-fallback.md)).
-One divergence remains on both paths:
-[`quantile()`](https://rdrr.io/r/stats/quantile.html)'s element names
-(`"10%"`) are dropped.
+One divergence remains on the native path:
+[`quantile()`](https://rdrr.io/r/stats/quantile.html) with more than one
+probability drops its element names (`"10%"`, `"90%"`). The CPU path
+keeps them, as dplyr does.

@@ -2,8 +2,8 @@
 
 [`infer_schema()`](https://bbtheo.github.io/cuplyr/reference/infer_schema.md)
 (R/ast.R) computes `names`/`types` recursively via each node type's own
-S3 method, but only `infer_schema.ast_join` (Phase 11 L2, Bug 1) threads
-`factor_levels` through on its own – every other node type
+S3 method, but only `infer_schema.ast_join` threads `factor_levels`
+through on its own – every other node type
 (filter/mutate/select/arrange/summarise/distinct/slice/rename/
 window/barrier) relies entirely on
 [`push_op()`](https://bbtheo.github.io/cuplyr/reference/push_op.md)'s

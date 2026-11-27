@@ -1,19 +1,21 @@
 # Count observations by group
 
 Counts the number of rows (or sums a weight column) for each combination
-of `...`, similar to
-[`dplyr::count()`](https://dplyr.tidyverse.org/reference/count.html).
-Sugar over
-[`group_by.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/group_by.tbl_gpu.md),
-[`summarise.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/summarise.tbl_gpu.md),
-and
+of `...`, as
+[`dplyr::count()`](https://dplyr.tidyverse.org/reference/count.html)
+does. It is
+[`group_by.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/group_by.tbl_gpu.md)
+followed by
+[`summarise.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/summarise.tbl_gpu.md)
+(and
 [`arrange.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/arrange.tbl_gpu.md)
-– runs on the GPU. The one exception is a `.drop = FALSE` grouping with
-a factor key, or a table with fixed group keys (after
+with `sort = TRUE`), and runs on the GPU. A grouping expression the GPU
+can't compute runs the whole call in dplyr on the CPU. A `.drop = FALSE`
+grouping with a factor key, or a table with fixed group keys (after
 [`filter()`](https://dplyr.tidyverse.org/reference/filter.html),
 [`semi_join()`](https://dplyr.tidyverse.org/reference/filter-joins.html),
-... on a `.drop = FALSE` table), which also collects the (small) group
-keys to add the empty groups.
+... on a `.drop = FALSE` table), also reads the (small) set of group
+keys back into R to add the empty groups.
 
 ## Usage
 
@@ -39,16 +41,15 @@ count(
 - ...:
 
   Column names or expressions to group by (e.g. `count(df, x)` or
-  `count(df, g = x %/% 10)`), parsed through the same expression IR
-  [`mutate.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/mutate.tbl_gpu.md)
-  uses for any computed expression. If `x` is already grouped, these are
-  added to the existing grouping (matching
-  `group_by(x, ..., .add = TRUE)`).
+  `count(df, g = x %/% 10)`). A computed expression is evaluated as in
+  [`mutate.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/mutate.tbl_gpu.md).
+  If `x` is already grouped, these are added to the existing grouping
+  (as `group_by(x, ..., .add = TRUE)`).
 
 - wt:
 
   Optional weight column/expression. If supplied, each group's count is
-  `sum(wt)` (NA-excluding) instead of the row count.
+  `sum(wt, na.rm = TRUE)` instead of the row count.
 
 - sort:
 
@@ -58,7 +59,7 @@ count(
 
   The name of the count column in the output. If `NULL` (default), uses
   `"n"`, or `"nn"`/`"nnn"`/... if `"n"` already names one of the
-  (post-`...`) grouping columns.
+  grouping columns (those of `x` and those in `...`).
 
 - .drop:
 
@@ -72,11 +73,10 @@ count(
 ## Value
 
 A `tbl_gpu` object with one row per group, containing the grouping
-columns and the count column. Grouping: if `x` was ungrouped, the result
-is ungrouped; if `x` was grouped, the result's grouping is restored to
-`x`'s ORIGINAL grouping in full (verified against dplyr 1.2.1 – see this
-file's header comment for why this is not simply "drop the last grouping
-level").
+columns and the count column. If `x` was ungrouped, the result is
+ungrouped; if `x` was grouped, the result keeps all of `x`'s grouping,
+as in dplyr (not one level less, as after
+[`summarise()`](https://dplyr.tidyverse.org/reference/summarise.html)).
 
 ## See also
 

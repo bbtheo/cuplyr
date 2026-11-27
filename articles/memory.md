@@ -12,11 +12,9 @@ This article covers the three ways cuplyr can allocate, how to switch
 between them, how to read what cuplyr holds, when memory is freed, and
 how to choose. It ends with numbers from one machine.
 
-``` r
-
-library(cuplyr)
-library(dplyr)
-```
+\
+[`library`](https://rdrr.io/r/base/library.html)`(`[`cuplyr`](https://github.com/bbtheo/cuplyr)`)`\
+[`library`](https://rdrr.io/r/base/library.html)`(`[`dplyr`](https://dplyr.tidyverse.org)`)`
 
 ## The three resources
 
@@ -90,15 +88,13 @@ cuplyr warns about invalid values and falls back:
   only the default, cuplyr installs `"pool"`. If you asked for `"async"`
   by name, it installs no resource (`"cuda"`).
 
-``` r
-
-# In a fresh R session, before loading cuplyr:
-options(cuplyr.memory_resource = "pool")   # the pool instead of async
-# or: options(cuplyr.memory_resource = "cuda")  # plain cudaMalloc; same as
-#     options(cuplyr.memory_pool = FALSE)
-# or: options(cuplyr.release_threshold = 0)      # async: keep nothing cached
-library(cuplyr)
-```
+\
+`# In a fresh R session, before loading cuplyr:`\
+[`options`](https://rdrr.io/r/base/options.html)`(``cuplyr.memory_resource ``=`` ``"pool"``)``   ``# the pool instead of async`\
+`# or: options(cuplyr.memory_resource = "cuda")  # plain cudaMalloc; same as`\
+`#     options(cuplyr.memory_pool = FALSE)`\
+`# or: options(cuplyr.release_threshold = 0)      # async: keep nothing cached`\
+[`library`](https://rdrr.io/r/base/library.html)`(`[`cuplyr`](https://github.com/bbtheo/cuplyr)`)`
 
 From a shell, `CUPLYR_MEMORY_RESOURCE=pool Rscript script.R` does the
 same. `cuplyr.pool_initial = 0` only skips the reservation at load. The
@@ -109,15 +105,13 @@ pool still grows and caches as it needs.
 [`gpu_memory_state()`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_state.md)
 reports the device and what cuplyr’s resource holds.
 
-``` r
-
-st <- gpu_memory_state()
-st$resource
-#> [1] "async"
-c(free = st$free_bytes, pool = st$pool_bytes, in_use = st$pool_used_bytes)
-#>        free        pool      in_use 
-#> 11604656128    33554432     1138378
-```
+\
+`st`` ``<-`` `[`gpu_memory_state`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_state.md)`(``)`\
+`st``$``resource`\
+`#> [1] "async"`\
+[`c`](https://rdrr.io/r/base/c.html)`(``free ``=`` ``st``$``free_bytes``, pool ``=`` ``st``$``pool_bytes``, in_use ``=`` ``st``$``pool_used_bytes``)`\
+`#>        free        pool      in_use `\
+`#> 11469848576    33554432     1135562`
 
 - `free_bytes`, `used_bytes` and `total_bytes` cover the whole device,
   every process, as `nvidia-smi` shows. `used_bytes` includes memory the
@@ -135,14 +129,12 @@ c(free = st$free_bytes, pool = st$pool_bytes, in_use = st$pool_used_bytes)
 To see how big your tables are, read `pool_used_bytes`. To see how much
 of the card you take from others, read `pool_bytes` or `free_bytes`.
 
-``` r
-
-gpu_df <- tbl_gpu(data.frame(x = runif(1e6)), lazy = FALSE)
-gpu_memory_usage(gpu_df)  # estimate from dimensions and types
-#> [1] 8125000
-gpu_memory_state()$pool_used_bytes
-#> [1] 9138378
-```
+\
+`gpu_df`` ``<-`` `[`tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md)`(`[`data.frame`](https://rdrr.io/r/base/data.frame.html)`(``x ``=`` `[`runif`](https://rdrr.io/r/stats/Uniform.html)`(``1e6``)``)``, lazy ``=`` ``FALSE``)`\
+[`gpu_memory_usage`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_usage.md)`(``gpu_df``)``  ``# estimate from dimensions and types`\
+`#> [1] 8125000`\
+[`gpu_memory_state`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_state.md)`(``)``$``pool_used_bytes`\
+`#> [1] 9135562`
 
 [`gpu_memory_usage()`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_usage.md)
 estimates a table’s size from its row count and column types without
@@ -176,14 +168,12 @@ another table, overlap in this estimate.
     `gpu_gc(aggressive = FALSE)` and retries the step once. A second
     failure raises an error of class `cuplyr_error_gpu_oom`.
 
-``` r
-
-rm(gpu_df)
-res <- gpu_gc()
-c(freed = res$freed_bytes, released = res$released_bytes)
-#>    freed released 
-#>  8002816        0
-```
+\
+[`rm`](https://rdrr.io/r/base/rm.html)`(``gpu_df``)`\
+`res`` ``<-`` `[`gpu_gc`](https://bbtheo.github.io/cuplyr/reference/gpu_gc.md)`(``)`\
+[`c`](https://rdrr.io/r/base/c.html)`(``freed ``=`` ``res``$``freed_bytes``, released ``=`` ``res``$``released_bytes``)`\
+`#>    freed released `\
+`#>    8e+06    0e+00`
 
 ## How to choose
 
@@ -276,73 +266,71 @@ each in a fresh session started with `CUPLYR_MEMORY_RESOURCE=async`,
 `CUPLYR_MEMORY_RESOURCE=pool`, or `CUPLYR_MEMORY_POOL=0`, and take the
 median of a few runs.
 
-``` r
-
-library(cuplyr)
-library(dplyr)
-
-# Median seconds per call over `samples` batches of `reps` calls.
-per_call <- function(fn, reps, samples = 15, warmup = 5) {
-  for (i in seq_len(warmup)) fn()
-  gpu_sync()
-  t <- vapply(seq_len(samples), function(i) {
-    gc(verbose = FALSE)
-    t0 <- proc.time()[["elapsed"]]
-    for (j in seq_len(reps)) fn()
-    gpu_sync()
-    (proc.time()[["elapsed"]] - t0) / reps
-  }, numeric(1))
-  median(t)
-}
-
-small <- tbl_gpu(data.frame(x = runif(1000), y = runif(1000)), lazy = FALSE)
-1e3 * per_call(function() mutate(small, z = x * 2 + y), reps = 200)
-
-big <- data.frame(x = runif(1e6), y = runif(1e6), k = sample.int(100L, 1e6, TRUE))
-lz <- tbl_gpu(big, lazy = TRUE)
-1e3 * per_call(function() {
-  lz |> filter(x > 0.1) |> mutate(z = x * y) |>
-    group_by(k) |> summarise(s = sum(z)) |> collect()
-}, reps = 10)
-rm(small, lz, big)
-
-# README-scale workflow: 25M rows x 6 columns (about 1 GB on the GPU).
-n <- 25e6
-taxi <- data.frame(
-  VendorID = sample(1:4, n, replace = TRUE),
-  payment_type = sample(1:5, n, replace = TRUE),
-  fare_amount = pmax(2.5, rnorm(n, mean = 13, sd = 10)),
-  tip_amount = pmax(0, rnorm(n, mean = 2.5, sd = 3)),
-  tolls_amount = runif(n, 0, 15),
-  trip_distance = pmax(0.1, rexp(n, rate = 0.3)))
-tg <- tbl_gpu(taxi, lazy = TRUE)
-rm(taxi); gc()
-1e3 * per_call(function() {
-  tg |> filter(fare_amount > 0, trip_distance > 0) |>
-    mutate(fare_per_mile = fare_amount / trip_distance) |>
-    group_by(VendorID, payment_type) |>
-    summarise(avg_fare_per_mile = mean(fare_per_mile),
-              avg_tip = mean(tip_amount), .groups = "drop") |>
-    collect()
-}, reps = 3, samples = 9, warmup = 2)
-rm(tg)
-
-# Held memory for a table of n doubles (1.25e8 = 1 GB, 3.75e8 = 3 GB).
-held <- function(n) {
-  host <- data.frame(a = runif(n))
-  gpu_gc()
-  free0 <- gpu_memory_state()$free_bytes   # the starting point
-  g <- tbl_gpu(host, lazy = FALSE)
-  gpu_sync()
-  rm(g); gc(); gc()
-  gpu_sync()
-  after_gc_sync <- free0 - gpu_memory_state()$free_bytes
-  gpu_gc()
-  s <- gpu_memory_state()
-  after_gpu_gc <- free0 - s$free_bytes
-  c(after_gc_sync = after_gc_sync, after_gpu_gc = after_gpu_gc,
-    pool_bytes = s$pool_bytes) / 1e9
-}
-held(1.25e8)
-held(3.75e8)
-```
+\
+[`library`](https://rdrr.io/r/base/library.html)`(`[`cuplyr`](https://github.com/bbtheo/cuplyr)`)`\
+[`library`](https://rdrr.io/r/base/library.html)`(`[`dplyr`](https://dplyr.tidyverse.org)`)`\
+\
+`` # Median seconds per call over `samples` batches of `reps` calls. ``\
+`per_call`` ``<-`` ``function``(``fn``, ``reps``, ``samples`` ``=`` ``15``, ``warmup`` ``=`` ``5``)`` ``{`\
+`  ``for`` ``(``i`` ``in`` `[`seq_len`](https://rdrr.io/r/base/seq.html)`(``warmup``)``)`` ``fn``(``)`\
+`  `[`gpu_sync`](https://bbtheo.github.io/cuplyr/reference/gpu_sync.md)`(``)`\
+`  ``t`` ``<-`` `[`vapply`](https://rdrr.io/r/base/lapply.html)`(`[`seq_len`](https://rdrr.io/r/base/seq.html)`(``samples``)``, ``function``(``i``)`` ``{`\
+`    `[`gc`](https://rdrr.io/r/base/gc.html)`(``verbose ``=`` ``FALSE``)`\
+`    ``t0`` ``<-`` `[`proc.time`](https://rdrr.io/r/base/proc.time.html)`(``)``[[``"elapsed"``]``]`\
+`    ``for`` ``(``j`` ``in`` `[`seq_len`](https://rdrr.io/r/base/seq.html)`(``reps``)``)`` ``fn``(``)`\
+`    `[`gpu_sync`](https://bbtheo.github.io/cuplyr/reference/gpu_sync.md)`(``)`\
+`    ``(`[`proc.time`](https://rdrr.io/r/base/proc.time.html)`(``)``[[``"elapsed"``]``]`` ``-`` ``t0``)`` ``/`` ``reps`\
+`  ``}``, `[`numeric`](https://rdrr.io/r/base/numeric.html)`(``1``)``)`\
+`  `[`median`](https://rdrr.io/r/stats/median.html)`(``t``)`\
+`}`\
+\
+`small`` ``<-`` `[`tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md)`(`[`data.frame`](https://rdrr.io/r/base/data.frame.html)`(``x ``=`` `[`runif`](https://rdrr.io/r/stats/Uniform.html)`(``1000``)``, y ``=`` `[`runif`](https://rdrr.io/r/stats/Uniform.html)`(``1000``)``)``, lazy ``=`` ``FALSE``)`\
+`1e3`` ``*`` ``per_call``(``function``(``)`` `[`mutate`](https://dplyr.tidyverse.org/reference/mutate.html)`(``small``, z ``=`` ``x`` ``*`` ``2`` ``+`` ``y``)``, reps ``=`` ``200``)`\
+\
+`big`` ``<-`` `[`data.frame`](https://rdrr.io/r/base/data.frame.html)`(``x ``=`` `[`runif`](https://rdrr.io/r/stats/Uniform.html)`(``1e6``)``, y ``=`` `[`runif`](https://rdrr.io/r/stats/Uniform.html)`(``1e6``)``, k ``=`` `[`sample.int`](https://rdrr.io/r/base/sample.html)`(``100L``, ``1e6``, ``TRUE``)``)`\
+`lz`` ``<-`` `[`tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md)`(``big``, lazy ``=`` ``TRUE``)`\
+`1e3`` ``*`` ``per_call``(``function``(``)`` ``{`\
+`  ``lz`` ``|>`` `[`filter`](https://dplyr.tidyverse.org/reference/filter.html)`(``x`` ``>`` ``0.1``)`` ``|>`` `[`mutate`](https://dplyr.tidyverse.org/reference/mutate.html)`(``z ``=`` ``x`` ``*`` ``y``)`` ``|>`\
+`    `[`group_by`](https://dplyr.tidyverse.org/reference/group_by.html)`(``k``)`` ``|>`` `[`summarise`](https://dplyr.tidyverse.org/reference/summarise.html)`(``s ``=`` `[`sum`](https://rdrr.io/r/base/sum.html)`(``z``)``)`` ``|>`` `[`collect`](https://dplyr.tidyverse.org/reference/compute.html)`(``)`\
+`}``, reps ``=`` ``10``)`\
+[`rm`](https://rdrr.io/r/base/rm.html)`(``small``, ``lz``, ``big``)`\
+\
+`# README-scale workflow: 25M rows x 6 columns (about 1 GB on the GPU).`\
+`n`` ``<-`` ``25e6`\
+`taxi`` ``<-`` `[`data.frame`](https://rdrr.io/r/base/data.frame.html)`(`\
+`  VendorID ``=`` `[`sample`](https://rdrr.io/r/base/sample.html)`(``1``:``4``, ``n``, replace ``=`` ``TRUE``)``,`\
+`  payment_type ``=`` `[`sample`](https://rdrr.io/r/base/sample.html)`(``1``:``5``, ``n``, replace ``=`` ``TRUE``)``,`\
+`  fare_amount ``=`` `[`pmax`](https://rdrr.io/r/base/Extremes.html)`(``2.5``, `[`rnorm`](https://rdrr.io/r/stats/Normal.html)`(``n``, mean ``=`` ``13``, sd ``=`` ``10``)``)``,`\
+`  tip_amount ``=`` `[`pmax`](https://rdrr.io/r/base/Extremes.html)`(``0``, `[`rnorm`](https://rdrr.io/r/stats/Normal.html)`(``n``, mean ``=`` ``2.5``, sd ``=`` ``3``)``)``,`\
+`  tolls_amount ``=`` `[`runif`](https://rdrr.io/r/stats/Uniform.html)`(``n``, ``0``, ``15``)``,`\
+`  trip_distance ``=`` `[`pmax`](https://rdrr.io/r/base/Extremes.html)`(``0.1``, `[`rexp`](https://rdrr.io/r/stats/Exponential.html)`(``n``, rate ``=`` ``0.3``)``)``)`\
+`tg`` ``<-`` `[`tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md)`(``taxi``, lazy ``=`` ``TRUE``)`\
+[`rm`](https://rdrr.io/r/base/rm.html)`(``taxi``)``; `[`gc`](https://rdrr.io/r/base/gc.html)`(``)`\
+`1e3`` ``*`` ``per_call``(``function``(``)`` ``{`\
+`  ``tg`` ``|>`` `[`filter`](https://dplyr.tidyverse.org/reference/filter.html)`(``fare_amount`` ``>`` ``0``, ``trip_distance`` ``>`` ``0``)`` ``|>`\
+`    `[`mutate`](https://dplyr.tidyverse.org/reference/mutate.html)`(``fare_per_mile ``=`` ``fare_amount`` ``/`` ``trip_distance``)`` ``|>`\
+`    `[`group_by`](https://dplyr.tidyverse.org/reference/group_by.html)`(``VendorID``, ``payment_type``)`` ``|>`\
+`    `[`summarise`](https://dplyr.tidyverse.org/reference/summarise.html)`(``avg_fare_per_mile ``=`` `[`mean`](https://rdrr.io/r/base/mean.html)`(``fare_per_mile``)``,`\
+`              avg_tip ``=`` `[`mean`](https://rdrr.io/r/base/mean.html)`(``tip_amount``)``, .groups ``=`` ``"drop"``)`` ``|>`\
+`    `[`collect`](https://dplyr.tidyverse.org/reference/compute.html)`(``)`\
+`}``, reps ``=`` ``3``, samples ``=`` ``9``, warmup ``=`` ``2``)`\
+[`rm`](https://rdrr.io/r/base/rm.html)`(``tg``)`\
+\
+`# Held memory for a table of n doubles (1.25e8 = 1 GB, 3.75e8 = 3 GB).`\
+`held`` ``<-`` ``function``(``n``)`` ``{`\
+`  ``host`` ``<-`` `[`data.frame`](https://rdrr.io/r/base/data.frame.html)`(``a ``=`` `[`runif`](https://rdrr.io/r/stats/Uniform.html)`(``n``)``)`\
+`  `[`gpu_gc`](https://bbtheo.github.io/cuplyr/reference/gpu_gc.md)`(``)`\
+`  ``free0`` ``<-`` `[`gpu_memory_state`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_state.md)`(``)``$``free_bytes``   ``# the starting point`\
+`  ``g`` ``<-`` `[`tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md)`(``host``, lazy ``=`` ``FALSE``)`\
+`  `[`gpu_sync`](https://bbtheo.github.io/cuplyr/reference/gpu_sync.md)`(``)`\
+`  `[`rm`](https://rdrr.io/r/base/rm.html)`(``g``)``; `[`gc`](https://rdrr.io/r/base/gc.html)`(``)``; `[`gc`](https://rdrr.io/r/base/gc.html)`(``)`\
+`  `[`gpu_sync`](https://bbtheo.github.io/cuplyr/reference/gpu_sync.md)`(``)`\
+`  ``after_gc_sync`` ``<-`` ``free0`` ``-`` `[`gpu_memory_state`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_state.md)`(``)``$``free_bytes`\
+`  `[`gpu_gc`](https://bbtheo.github.io/cuplyr/reference/gpu_gc.md)`(``)`\
+`  ``s`` ``<-`` `[`gpu_memory_state`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_state.md)`(``)`\
+`  ``after_gpu_gc`` ``<-`` ``free0`` ``-`` ``s``$``free_bytes`\
+`  `[`c`](https://rdrr.io/r/base/c.html)`(``after_gc_sync ``=`` ``after_gc_sync``, after_gpu_gc ``=`` ``after_gpu_gc``,`\
+`    pool_bytes ``=`` ``s``$``pool_bytes``)`` ``/`` ``1e9`\
+`}`\
+`held``(``1.25e8``)`\
+`held``(``3.75e8``)`

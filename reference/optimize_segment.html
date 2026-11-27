@@ -7,7 +7,7 @@
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -64,7 +64,7 @@ segment's output (<code>NULL</code> means all of <code>ast</code>'s own output c
 
 <dt id="arg-keep-mutates">keep_mutates<a class="anchor" aria-label="anchor" href="#arg-keep-mutates"></a></dt>
 <dd><p><code>TRUE</code> when <code>required_cols</code> is a barrier's narrower
-requirement (F99): that pruning removes columns only, so a mutate
+requirement: that pruning removes columns only, so a mutate
 expression nothing reads stays and is computed (it can warn, as in dplyr),
 and <code><a href="prune_dead_columns.html">prune_dead_columns()</a></code> does not run. Its inputs stay required
 (<code><a href="push_down_projections.html">push_down_projections()</a></code> keeps them).</p></dd>

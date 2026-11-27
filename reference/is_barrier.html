@@ -19,7 +19,7 @@ the same way filter pushdown already works across select."><meta property="og:im
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -91,12 +91,12 @@ the result.</p>
 above: the simplest safe choice for a schema-only rename, avoiding the
 need to translate column references through its name map for anything
 pushed across it.</p>
-<p><code>window</code> (<code>scratchpad/phase5_window_design.md</code> section 2.1) is a barrier:
+<p><code>window</code> is a barrier:
 every window spec's result depends on the FULL row set (which rows exist)
 and the current row order (frames are built from a stable sort of
 group+order columns) – nothing may be pushed across it, the same
 reasoning as <code>arrange</code>/<code>slice</code>.</p>
-<p>Phase 12 audit note: barrier classification only matters for node TYPES
+<p>Barrier classification only matters for node TYPES
 that actually appear in an AST at all. <code><a href="https://dplyr.tidyverse.org/reference/do.html" class="external-link">do()</a></code>/<code><a href="https://dplyr.tidyverse.org/reference/rows.html" class="external-link">rows_insert()</a></code>/
 <code><a href="https://dplyr.tidyverse.org/reference/rows.html" class="external-link">rows_append()</a></code>/<code><a href="https://dplyr.tidyverse.org/reference/rows.html" class="external-link">rows_update()</a></code>/<code><a href="https://dplyr.tidyverse.org/reference/rows.html" class="external-link">rows_patch()</a></code>/<code><a href="https://dplyr.tidyverse.org/reference/rows.html" class="external-link">rows_upsert()</a></code>/
 <code><a href="https://dplyr.tidyverse.org/reference/rows.html" class="external-link">rows_delete()</a></code>, and every colwise/pick-bearing call (<code><a href="https://dplyr.tidyverse.org/reference/mutate_all.html" class="external-link">mutate_at()</a></code>,

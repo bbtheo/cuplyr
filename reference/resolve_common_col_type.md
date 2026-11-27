@@ -1,21 +1,19 @@
-# Resolve the common GPU type for one column across a bind/set operation (Phase 11 L4)
+# Resolve the common GPU type for one column across a bind/set operation
 
-The type-compatibility ladder extracted out of
+The type-compatibility ladder shared by
 [`check_set_op_compatible()`](https://bbtheo.github.io/cuplyr/reference/check_set_op_compatible.md)
-(R/sets.R, Phase 8) so
+(R/sets.R) and
 [`bind_rows()`](https://bbtheo.github.io/cuplyr/reference/bind_rows.md)'s
-[`compute_unified_schema()`](https://bbtheo.github.io/cuplyr/reference/compute_unified_schema.md)
-and the set-op verbs share EXACTLY one promotion rule, instead of
+[`compute_unified_schema()`](https://bbtheo.github.io/cuplyr/reference/compute_unified_schema.md),
+so the set-op verbs and
 [`bind_rows()`](https://bbtheo.github.io/cuplyr/reference/bind_rows.md)
-having its own looser one (the old `promote_types()`'s unconditional
-"STRING is widest" rule, which silently coerced e.g. a numeric column
-against a character column of the same name – a real bug: real dplyr's
-own
-[`vctrs::vec_ptype2()`](https://vctrs.r-lib.org/reference/vec_ptype2.html)-backed
-[`bind_rows()`](https://bbtheo.github.io/cuplyr/reference/bind_rows.md)
-has never allowed this, it's a hard `vctrs_error_incompatible_type`, see
+use EXACTLY one promotion rule. A numeric column against a character
+column of the same name is not coerced to STRING: as in real dplyr
+([`vctrs::vec_ptype2()`](https://vctrs.r-lib.org/reference/vec_ptype2.html)-backed
+[`bind_rows()`](https://bbtheo.github.io/cuplyr/reference/bind_rows.md)),
+it's a hard `vctrs_error_incompatible_type`, see
 [`abort_bind_rows_incompatible()`](https://bbtheo.github.io/cuplyr/reference/abort_bind_rows_incompatible.md)
-below).
+below.
 
 ## Usage
 
@@ -73,14 +71,8 @@ Four cases, all pinned via oracle-verified `dplyr`/`vctrs` behavior:
   that INT64 (integer64) and FLOAT64 have no common type) or both in the
   timestamp ladder (`TIMESTAMP_DAYS < ... < TIMESTAMP_NANOSECONDS`):
   promotes to the wider member. The timestamp cast (Date \<-\> POSIXct,
-  etc.) is genuinely native as of Phase 11 L3 (`gpu_cast_column()`,
-  `src/ops_bind.cpp`, gained the 5 TIMESTAMP\_\* targets) – this ladder
-  used to require
-  [`check_set_op_compatible()`](https://bbtheo.github.io/cuplyr/reference/check_set_op_compatible.md)'s
-  own caller to set a `$needs_fallback` flag for exactly this case (no
-  native `TIMESTAMP_DAYS` -\> `TIMESTAMP_MICROSECONDS` cast existed
-  yet); that flag is retired, this ladder is now unconditionally native
-  for both callers.
+  etc.) is native (`gpu_cast_column()`, `src/ops_bind.cpp`, handles the
+  TIMESTAMP\_\* targets), so this ladder is native for both callers.
 
 - Anything else (e.g. numeric vs. character, factor vs. numeric, numeric
   vs. timestamp): `$ok = FALSE` – the caller reports its own

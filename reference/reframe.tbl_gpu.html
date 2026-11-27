@@ -11,7 +11,7 @@ size-1 results are recycled to each group's size."><meta property="og:image" con
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -97,8 +97,9 @@ integer arithmetic on them, and literals.
 string column under a C collation. Sizes above 1 must agree, and no
 expression may read an earlier one's result.</p>
 <p>Anything else runs dplyr's <code><a href="https://dplyr.tidyverse.org/reference/reframe.html" class="external-link">reframe()</a></code> on the CPU (see <a href="cuplyr-fallback.html">cuplyr-fallback</a>).
-One divergence remains on both paths: <code><a href="https://rdrr.io/r/stats/quantile.html" class="external-link">quantile()</a></code>'s element names (<code>"10%"</code>)
-are dropped.</p>
+One divergence remains on the native path: <code><a href="https://rdrr.io/r/stats/quantile.html" class="external-link">quantile()</a></code> with more than one
+probability drops its element names (<code>"10%"</code>, <code>"90%"</code>). The CPU path keeps
+them, as dplyr does.</p>
     </div>
 
   </main><aside class="col-md-3"><nav id="toc" aria-label="Table of contents"><h2>On this page</h2>

@@ -1,4 +1,4 @@
-# Friendly, `vctrs`-bracket-style type label for a `bind_rows()` incompatible-type error (Phase 11 L4)
+# Friendly, `vctrs`-bracket-style type label for a `bind_rows()` incompatible-type error
 
 Mirrors real dplyr/vctrs' own `<double>`/`<character>`/`<date>`/
 `<datetime<UTC>>` labels (verified empirically:

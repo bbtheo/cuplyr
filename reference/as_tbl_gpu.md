@@ -7,8 +7,6 @@ transferring data to GPU memory.
 
 ``` r
 as_tbl_gpu(x, ...)
-
-as_gibble(x, ...)
 ```
 
 ## Arguments
@@ -38,7 +36,7 @@ if (has_gpu()) {
   gpu_df <- as_tbl_gpu(iris)
   print(gpu_df)
 }
-#> # A gibble: 150 × 5
+#> # A tbl_gpu: 150 × 5
 #> $ Sepal.Length <dbl> 5.1, 4.9, 4.7, 4.6, 5, 5.4, 4.6, 5, 4.4, 4.9
 #> $ Sepal.Width  <dbl> 3.5, 3, 3.2, 3.1, 3.6, 3.9, 3.4, 3.4, 2.9, 3.1
 #> $ Petal.Length <dbl> 1.4, 1.4, 1.3, 1.5, 1.4, 1.7, 1.4, 1.5, 1.4, 1.5

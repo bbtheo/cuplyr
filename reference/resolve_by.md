@@ -1,12 +1,10 @@
 # Resolve a verb's `.by=`/`by=` quosure into group column names
 
-Implements `scratchpad/phase5_window_design.md` section 6: the shared
-resolution logic for on-the-fly grouping across
+The shared resolution logic for on-the-fly grouping across
 [`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html)/[`filter()`](https://dplyr.tidyverse.org/reference/filter.html)
-(and, from task W7 onward, the
-[`slice()`](https://dplyr.tidyverse.org/reference/slice.html) family).
-`.by=`/`by=` is mutually exclusive with an already-grouped `.data` –
-verified empirically against dplyr 1.2.1, both
+and the [`slice()`](https://dplyr.tidyverse.org/reference/slice.html)
+family. `.by=`/`by=` is mutually exclusive with an already-grouped
+`.data` – verified empirically against dplyr 1.2.1, both
 [`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html) and
 [`filter()`](https://dplyr.tidyverse.org/reference/filter.html) raise
 the identical message below verbatim (including the backticks) when
@@ -33,7 +31,7 @@ resolve_by(
 - by_quo:
 
   A quosure for the verb's `.by=`/`by=` argument, as returned by
-  `rlang::enquo(.by)` – NOT yet evaluated
+  `rlang::enquo(.by)` – NOT evaluated
 
 - arg_name:
 

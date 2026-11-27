@@ -28,7 +28,8 @@ compute(x, ..., name = NULL)
 
 ## Value
 
-A `tbl_gpu` with all operations materialized and `lazy_ops` cleared.
+A `tbl_gpu` whose pending steps have all run, holding the result in GPU
+memory. It keeps its execution mode, so a lazy table stays lazy.
 
 ## Details
 

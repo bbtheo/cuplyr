@@ -18,6 +18,5 @@ ir_parse_when_reduce(expr, env, schema, fn_name)
 
 ## Details
 
-`size=` (only meaningful for the zero-input edge case) is NOT
-implemented this wave – its presence, or zero dots, makes this return
-`NULL`.
+`size=` (only meaningful for the zero-input edge case) is NOT supported
+– its presence, or zero dots, makes this return `NULL`.

@@ -3,17 +3,15 @@
 -column (dplyr's own desc() shorthand, also usable directly as an
 arrange()/order_by() sort key) and resolves it against schema.
 Anything else – a general expression such as order_by(a + b, ...) –
-is not implemented this wave (mirroring R/window.R's rank-family
-design note: only a bare, already-existing column doubles as an order
-key so far, no ..winarg..-style hoisting for order columns yet) and
+is not supported (only a bare, already-existing column doubles as an
+order key; there is no ..winarg..-style hoisting for order columns) and
 returns NULL, same as any other unsupported IR shape (callers fall
 back)."><meta property="og:description" content="Recognizes a bare column name, desc(column)/dplyr::desc(column), or
 -column (dplyr's own desc() shorthand, also usable directly as an
 arrange()/order_by() sort key) and resolves it against schema.
 Anything else – a general expression such as order_by(a + b, ...) –
-is not implemented this wave (mirroring R/window.R's rank-family
-design note: only a bare, already-existing column doubles as an order
-key so far, no ..winarg..-style hoisting for order columns yet) and
+is not supported (only a bare, already-existing column doubles as an
+order key; there is no ..winarg..-style hoisting for order columns) and
 returns NULL, same as any other unsupported IR shape (callers fall
 back)."><meta property="og:image" content="https://bbtheo.github.io/cuplyr/logo.png"></head><body>
     <a href="#main" class="visually-hidden-focusable">Skip to contents</a>
@@ -23,7 +21,7 @@ back)."><meta property="og:image" content="https://bbtheo.github.io/cuplyr/logo.
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -61,9 +59,8 @@ back)."><meta property="og:image" content="https://bbtheo.github.io/cuplyr/logo.
 <code>-column</code> (dplyr's own <code><a href="https://dplyr.tidyverse.org/reference/desc.html" class="external-link">desc()</a></code> shorthand, also usable directly as an
 <code><a href="https://dplyr.tidyverse.org/reference/arrange.html" class="external-link">arrange()</a></code>/<code><a href="https://dplyr.tidyverse.org/reference/order_by.html" class="external-link">order_by()</a></code> sort key) and resolves it against <code>schema</code>.
 Anything else – a general expression such as <code>order_by(a + b, ...)</code> –
-is not implemented this wave (mirroring <code>R/window.R</code>'s rank-family
-design note: only a bare, already-existing column doubles as an order
-key so far, no <code>..winarg..</code>-style hoisting for order columns yet) and
+is not supported (only a bare, already-existing column doubles as an
+order key; there is no <code>..winarg..</code>-style hoisting for order columns) and
 returns <code>NULL</code>, same as any other unsupported IR shape (callers fall
 back).</p>
     </div>

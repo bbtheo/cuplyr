@@ -7,8 +7,7 @@ before pushing any AST node – a window call whose spec isn't lowerable
 user-facing shape) must fall back to gpu_fallback() cleanly, never
 surface validate_window_spec()'s internal-error text to a user, and
 never partially push GPU ops before discovering the need to fall back
-(see scratchpad/phase5_window_design.md section 1.3's &quot;Never
-half-lower&quot;)."><meta property="og:description" content="The non-throwing predicate half of validate_window_spec() (below),
+(never half-lower)."><meta property="og:description" content="The non-throwing predicate half of validate_window_spec() (below),
 factored out so mutate()'s window wiring (R/mutate.R,
 mutate_window()) can check every spec a decomposition plan produces
 before pushing any AST node – a window call whose spec isn't lowerable
@@ -16,8 +15,7 @@ before pushing any AST node – a window call whose spec isn't lowerable
 user-facing shape) must fall back to gpu_fallback() cleanly, never
 surface validate_window_spec()'s internal-error text to a user, and
 never partially push GPU ops before discovering the need to fall back
-(see scratchpad/phase5_window_design.md section 1.3's &quot;Never
-half-lower&quot;)."><meta property="og:image" content="https://bbtheo.github.io/cuplyr/logo.png"></head><body>
+(never half-lower)."><meta property="og:image" content="https://bbtheo.github.io/cuplyr/logo.png"></head><body>
     <a href="#main" class="visually-hidden-focusable">Skip to contents</a>
 
 
@@ -25,7 +23,7 @@ half-lower&quot;)."><meta property="og:image" content="https://bbtheo.github.io/
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -67,8 +65,7 @@ factored out so <code><a href="https://dplyr.tidyverse.org/reference/mutate.html
 user-facing shape) must fall back to <code><a href="gpu_fallback.html">gpu_fallback()</a></code> cleanly, never
 surface <code><a href="validate_window_spec.html">validate_window_spec()</a></code>'s internal-error text to a user, and
 never partially push GPU ops before discovering the need to fall back
-(see <code>scratchpad/phase5_window_design.md</code> section 1.3's "Never
-half-lower").</p>
+(never half-lower).</p>
     </div>
 
     <div class="section level2">
@@ -90,23 +87,21 @@ half-lower").</p>
     </div>
     <div class="section level2">
     <h2 id="details">Details<a class="anchor" aria-label="anchor" href="#details"></a></h2>
-    <p>As of Phase 5 task W4, every window <code>fn</code> with a registry <code>window</code> entry
-is lowerable (<code>"shift"</code>, <code>"rank"</code>, <code>"scan"</code>, and <code>"agg"</code> kinds all have
-C++ support in <code>gpu_window()</code>) – this predicate now only guards against
-an <code>fn</code> with NO registry entry at all, or a registry entry whose
-<code>window</code> field is <code>NULL</code> (not a window-class op), which should be
-unreachable in practice (nothing in <code>R/window.R</code>'s decomposition
-machinery can produce such a spec) but is checked defensively so a
-bug surfaces as a clear internal error instead of silently mis-executing.</p>
-<p>The rolling-window task (scratchpad/todo.md) adds a sixth kind,
-<code>"rolling"</code>, lowerable for every <code>fn</code> EXCEPT <code>"roll_median"</code>: cudf
-25.12's <code>rolling_window()</code>/<code>grouped_rolling_window()</code> have no MEDIAN
-aggregation instantiation at all in this environment (verified via <code>nm -DC libcudf.so</code>, see the file-level comment above
-<code><a href="ir_parse_roll_call.html">ir_parse_roll_call()</a></code>, R/ir.R) – a genuine cudf capability gap, not a
-cuplyr bug, so <code><a href="roll.html">roll_median()</a></code>/<code><a href="https://rdrr.io/pkg/data.table/man/froll.html" class="external-link">data.table::frollmedian()</a></code> mutate()
-calls route through <code>mutate_window_fallback()</code> exactly like the
-not-yet-implemented-kind case below, needing <code>R/roll.R</code>'s real
-<code><a href="roll.html">roll_median()</a></code> R function to make that CPU re-run work.</p>
+    <p>Every window <code>fn</code> whose registry <code>window</code> entry has kind <code>"shift"</code>,
+<code>"rank"</code>, <code>"scan"</code> or <code>"agg"</code> is lowerable (all four have C++ support in
+<code>gpu_window()</code>), and so is every <code>"rolling"</code> <code>fn</code> except <code>"roll_median"</code>
+(below). Otherwise the predicate is <code>FALSE</code>: an <code>fn</code> with no registry
+entry at all, or a registry entry whose <code>window</code> field is <code>NULL</code> (not a
+window-class op), should be unreachable (nothing in <code>R/window.R</code>'s
+decomposition machinery produces such a spec) but is checked defensively
+so a bug surfaces as a clear internal error instead of silently
+mis-executing.</p>
+<p><code>"roll_median"</code> is not lowerable: libcudf's <code>rolling_window()</code>/
+<code>grouped_rolling_window()</code> have no MEDIAN aggregation (see the
+file-level comment above <code><a href="ir_parse_roll_call.html">ir_parse_roll_call()</a></code>, R/ir.R). So
+<code><a href="roll.html">roll_median()</a></code>/<code><a href="https://rdrr.io/pkg/data.table/man/froll.html" class="external-link">data.table::frollmedian()</a></code> mutate() calls go through
+<code>mutate_window_fallback()</code>, the same whole-call CPU re-run as any other
+unlowerable spec, which calls <code>R/roll.R</code>'s <code><a href="roll.html">roll_median()</a></code> R function.</p>
     </div>
 
   </main><aside class="col-md-3"><nav id="toc" aria-label="Table of contents"><h2>On this page</h2>

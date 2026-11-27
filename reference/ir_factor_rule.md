@@ -1,4 +1,4 @@
-# Where may a factor stay on the GPU? (F18's rule, one bottom-up pass)
+# Where may a factor stay on the GPU? (one bottom-up pass)
 
 The GPU holds only a factor's integer codes, while dplyr/base R resolve
 a factor through its labels. A *factor operand* is a DICTIONARY32 column
@@ -34,8 +34,8 @@ root itself is a bare factor column), or `"cpu"`
 2.  directly inside [`is.na()`](https://rdrr.io/r/base/NA.html) /
     [`n_distinct()`](https://dplyr.tidyverse.org/reference/n_distinct.html);
 
-3.  as the column of F50's `factor_codes()`/`factor_labels()` (the parse
-    hooks turn a label comparison or `as.character(f)` into these);
+3.  as the column of `factor_codes()`/`factor_labels()` (the parse hooks
+    turn a label comparison or `as.character(f)` into these);
 
 4.  as both operands of `==`/`!=` when both are factor *columns* with
     identical level vectors (labels, order and `ordered` flag);

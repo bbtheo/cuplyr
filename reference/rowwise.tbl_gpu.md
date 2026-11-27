@@ -19,12 +19,12 @@ replaces it, and
 
 ``` r
 # S3 method for class 'tbl_gpu'
-rowwise(.data, ...)
+rowwise(data, ...)
 ```
 
 ## Arguments
 
-- .data:
+- data:
 
   A `tbl_gpu`.
 

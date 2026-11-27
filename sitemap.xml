@@ -61,6 +61,7 @@
 <url><loc>https://bbtheo.github.io/cuplyr/reference/build_window_cpp_spec.html</loc></url>
 <url><loc>https://bbtheo.github.io/cuplyr/reference/cast_column.html</loc></url>
 <url><loc>https://bbtheo.github.io/cuplyr/reference/cast_join_key_column.html</loc></url>
+<url><loc>https://bbtheo.github.io/cuplyr/reference/cast_unspecified_join_key.html</loc></url>
 <url><loc>https://bbtheo.github.io/cuplyr/reference/check_deps.html</loc></url>
 <url><loc>https://bbtheo.github.io/cuplyr/reference/check_join_cardinality.html</loc></url>
 <url><loc>https://bbtheo.github.io/cuplyr/reference/check_join_cols_unique.html</loc></url>
@@ -68,6 +69,8 @@
 <url><loc>https://bbtheo.github.io/cuplyr/reference/check_relationship_one_to_many.html</loc></url>
 <url><loc>https://bbtheo.github.io/cuplyr/reference/check_relationship_one_to_one.html</loc></url>
 <url><loc>https://bbtheo.github.io/cuplyr/reference/check_set_op_compatible.html</loc></url>
+<url><loc>https://bbtheo.github.io/cuplyr/reference/check_unspecified_join_key.html</loc></url>
+<url><loc>https://bbtheo.github.io/cuplyr/reference/check_unspecified_key_result.html</loc></url>
 <url><loc>https://bbtheo.github.io/cuplyr/reference/check_zero_column_input.html</loc></url>
 <url><loc>https://bbtheo.github.io/cuplyr/reference/collapse.tbl_gpu.html</loc></url>
 <url><loc>https://bbtheo.github.io/cuplyr/reference/collect.tbl_gpu.html</loc></url>
@@ -279,7 +282,6 @@
 <url><loc>https://bbtheo.github.io/cuplyr/reference/rename.tbl_gpu.html</loc></url>
 <url><loc>https://bbtheo.github.io/cuplyr/reference/rename_with.tbl_gpu.html</loc></url>
 <url><loc>https://bbtheo.github.io/cuplyr/reference/reorder_filters.html</loc></url>
-<url><loc>https://bbtheo.github.io/cuplyr/reference/repair_names.html</loc></url>
 <url><loc>https://bbtheo.github.io/cuplyr/reference/replace_segment_stub.html</loc></url>
 <url><loc>https://bbtheo.github.io/cuplyr/reference/resolve_by.html</loc></url>
 <url><loc>https://bbtheo.github.io/cuplyr/reference/resolve_call_fn.html</loc></url>

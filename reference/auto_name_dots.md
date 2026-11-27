@@ -1,16 +1,15 @@
 # Auto-name unnamed dots, warning as dplyr's verbs do
 
+Verbs such as
 [`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html) and
 [`summarise()`](https://dplyr.tidyverse.org/reference/summarise.html)
-both accept unnamed expressions (e.g. `mutate(mpg * 2)`) and, matching
-dplyr, fall back to the expression's deparsed text as the output column
-name – while warning that an explicit name would be clearer.
-Historically this logic was duplicated verbatim inside both
-[`mutate.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/mutate.tbl_gpu.md)
-(twice – once for its since-deleted eager path, once for its
-since-deleted lazy path) and `summarise_lazy()` (now also deleted); this
-is the single shared implementation, parameterized by `verb` so each
-caller's warning names itself correctly.
+accept unnamed expressions (e.g. `mutate(mpg * 2)`) and, matching dplyr,
+fall back to the expression's deparsed text as the output column name –
+while warning that an explicit name would be clearer. This is the single
+shared implementation for
+[`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html) and
+[`summarise()`](https://dplyr.tidyverse.org/reference/summarise.html),
+parameterized by `verb` so each caller's warning names itself correctly.
 
 ## Usage
 

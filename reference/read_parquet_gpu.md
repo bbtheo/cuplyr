@@ -128,17 +128,42 @@ plan runs, not as it was when the table was made. The row count
 the footer at the time you ask. Reading one lazy table twice reads the
 file twice.
 
+A window [`min()`](https://rdrr.io/r/base/Extremes.html) or
+[`max()`](https://rdrr.io/r/base/Extremes.html) in
+[`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html) or
+[`filter()`](https://dplyr.tidyverse.org/reference/filter.html) over a
+lazy table can also look at the files at the verb, before
+[`collect()`](https://dplyr.tidyverse.org/reference/compute.html): it
+may read the footers (the row count of a plan that keeps its rows, one
+footer per file, so a missing file is an error at the verb), or run a
+small query over the plan to learn whether a result or a `.drop = FALSE`
+group is empty, which decides whether an integer result is a double. The
+query reads only the columns the pending steps need to give their rows,
+and an error in one of those steps (a missing file included) is an error
+at the verb. The plan is not run early, and its warnings come when it
+runs. (An integer or logical
+[`min()`](https://rdrr.io/r/base/Extremes.html)/[`max()`](https://rdrr.io/r/base/Extremes.html)
+in [`summarise()`](https://dplyr.tidyverse.org/reference/summarise.html)
+runs the plan at the verb, as for any lazy table.) If a file changes
+after that, the types such a plan promised can be stale: a file emptied
+after the verb stops the run with `cuplyr_error_parquet_file_emptied`
+when the type came from the footer, and gives the type the plan said
+(not dplyr's) when it came from the query, whose warning also names the
+empty groups it found. Make the table again after changing a file.
+
 ### Errors
 
 All errors have class `cuplyr_error_parquet` and a more specific one,
 and name the file: `cuplyr_error_parquet_not_found`, `_invalid` (not a
 parquet file, corrupt footer), `_unsupported_type`, `_schema_changed`,
 `_schema_mismatch` (files that differ), `_unknown_column` and `_columns`
-(`columns =` names no column or is empty), `_write` and `_compression`.
-Several files are read by one libcudf call that doesn't say which file a
-problem is in, so those messages say "one of the parquet files". Running
-out of GPU memory is `cuplyr_error_gpu_oom`, with the file in the
-message.
+(`columns =` names no column or is empty), `_file_emptied` (a file
+emptied after a
+[`min()`](https://rdrr.io/r/base/Extremes.html)/[`max()`](https://rdrr.io/r/base/Extremes.html)
+typed a plan from its footer), `_write` and `_compression`. Several
+files are read by one libcudf call that doesn't say which file a problem
+is in, so those messages say "one of the parquet files". Running out of
+GPU memory is `cuplyr_error_gpu_oom`, with the file in the message.
 
 ### Writing
 
@@ -163,14 +188,14 @@ it is a comparison of a column with a literal that converts to the
 column's file type without change (`==`, `!=`, `<`, `<=`, `>`, `>=`) on
 an integer, `integer64`, `Date` or `POSIXct` column, or `!is.na()` of an
 `integer` or `integer64` column; the `&`s of a condition are split.
-Comparisons on double and string columns are not pushed: libcudf 25.12
-can skip a row group wrongly from a double column's `NaN` statistics or
-a string column's deprecated min/max statistics (signed byte order),
-which would lose rows. They are applied after the read, so a filter on
-doubles or strings gives the same rows but skips no row groups. A factor
-written by `arrow::write_parquet()` reads as a string (see above), so it
-is not pushed either. Everything else (`|`, `!`,
-[`is.na()`](https://rdrr.io/r/base/NA.html), `%in%`, arithmetic,
+Comparisons on double and string columns are not pushed: libcudf can
+skip a row group wrongly from a double column's `NaN` statistics, and a
+string column's deprecated min/max statistics (signed byte order) are
+not proved safe, and either would lose rows. They are applied after the
+read, so a filter on doubles or strings gives the same rows but skips no
+row groups. A factor written by `arrow::write_parquet()` reads as a
+string (see above), so it is not pushed either. Everything else (`|`,
+`!`, [`is.na()`](https://rdrr.io/r/base/NA.html), `%in%`, arithmetic,
 functions, a double literal against an `integer64` column, a column that
 was converted on reading such as a factor, a filter on a grouped table,
 with `.by`, or on a rowwise table, a filter that comes after a

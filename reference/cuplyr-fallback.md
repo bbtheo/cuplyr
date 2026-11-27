@@ -64,9 +64,10 @@ default (`"silent"`) is used. All cuplyr options are listed on
 
 ## See also
 
-[cuplyr-options](https://bbtheo.github.io/cuplyr/reference/cuplyr-options.md),
-[`cuplyr_fallback_notify()`](https://bbtheo.github.io/cuplyr/reference/cuplyr_fallback_notify.md),
+[cuplyr-options](https://bbtheo.github.io/cuplyr/reference/cuplyr-options.md)
+for every cuplyr option, and
 [fallback-verbs](https://bbtheo.github.io/cuplyr/reference/fallback-verbs.md)
+for the verbs that have no GPU implementation.
 
 ## Examples
 

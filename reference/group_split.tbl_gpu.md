@@ -1,17 +1,15 @@
 # Split a GPU table into one GPU table per group (dplyr backend method)
 
-Native:
 [`dplyr::group_split()`](https://dplyr.tidyverse.org/reference/group_split.html)
-on a `tbl_gpu` groups by `...` (or uses the existing groups), computes
-the group row indices on the GPU
-([`compute_group_data()`](https://bbtheo.github.io/cuplyr/reference/compute_group_data.md):
-sorted keys, NA last, `.drop = FALSE` and preserved empty groups),
-gathers the rows into group order and cuts the table at the group sizes
-(`gpu_split_rows()`). The chunks are `tbl_gpu` tables, as dplyr's chunks
-have the class of the ungrouped input, and the `list_of` ptype is a
-0-row `tbl_gpu`. A table left with no columns (every column dropped by
-`.keep = FALSE`) is the one case that still goes through the CPU
-fallback.
+on a `tbl_gpu` runs on the GPU. It groups by `...` (or uses the existing
+groups), finds the rows of each group (groups in sorted key order, `NA`
+last, as
+[`group_data()`](https://dplyr.tidyverse.org/reference/group_data.html)
+gives them, empty groups included), puts the rows in group order and
+cuts the table into one piece per group. The pieces are `tbl_gpu`
+tables, as dplyr's pieces have the class of the ungrouped input, and the
+`list_of` prototype is a 0-row `tbl_gpu`. A table left with no columns
+(every column dropped by `.keep = FALSE`) runs in dplyr on the CPU.
 
 ## Usage
 

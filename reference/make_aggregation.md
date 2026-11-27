@@ -37,8 +37,8 @@ make_aggregation(
 
 - na_rm:
 
-  Logical scalar (Phase 6, task 6.1; extended Phase 6, task 6.2).
-  `FALSE` (the default, matching R's own `na.rm = FALSE` default for
+  Logical scalar. `FALSE` (the default, matching R's own `na.rm = FALSE`
+  default for
   [`mean()`](https://rdrr.io/r/base/mean.html)/[`sum()`](https://rdrr.io/r/base/sum.html)/[`min()`](https://rdrr.io/r/base/Extremes.html)/[`max()`](https://rdrr.io/r/base/Extremes.html)/[`sd()`](https://rdrr.io/r/stats/sd.html)/[`var()`](https://rdrr.io/r/stats/cor.html)/[`median()`](https://rdrr.io/r/stats/median.html))
   means a group with ANY null input value must produce a NULL
   aggregation result for the WHOLE group – cudf's own groupby
@@ -46,7 +46,7 @@ make_aggregation(
   nulls, so `gpu_summarise()` (`src/ops_groupby.cpp`) applies an extra
   whole-group-null propagation step when this is `FALSE` and the input
   column actually has nulls (same technique as the window-aggregate
-  path, `src/ops_window.cpp`, W4). `TRUE` means "use cudf's native
+  path, `src/ops_window.cpp`). `TRUE` means "use cudf's native
   null-excluding behavior as-is" – no extra step. Meaningless for
   [`n()`](https://dplyr.tidyverse.org/reference/context.html) (counts
   rows regardless of nulls, matching dplyr already). For
@@ -80,16 +80,17 @@ make_aggregation(
 
 - identity:
 
-  Logical scalar (F07). `TRUE` (the default) lets a
+  Logical scalar. `TRUE` (the default) lets a
   [`min()`](https://rdrr.io/r/base/Extremes.html)/[`max()`](https://rdrr.io/r/base/Extremes.html)
   over an INT32/FLOAT64 column apply base R's empty-vector identity
   (`Inf`/`-Inf`, with dplyr's warning) for an empty group, which
   promotes an INT32 result column to FLOAT64 when it happens; see
-  `gpu_summarise()` (`src/ops_groupby.cpp`). `FALSE` is for internal
-  helper aggregations (`summarise_by_desugar()`'s row-position
-  [`min()`](https://rdrr.io/r/base/Extremes.html)) that must stay INT32
-  and never warn. Only meaningful for `min`/`max` over INT32/FLOAT64;
-  stored as `FALSE` for everything else.
+  `gpu_summarise()` (`src/ops_groupby.cpp`). A STRING or Date/POSIXct
+  one keeps its null value but is counted the same way, for dplyr's
+  warning. `FALSE` would keep the result INT32 and never warn, but
+  nothing calls it with `FALSE` today. Only meaningful for `min`/`max`
+  over INT32/FLOAT64/STRING/timestamps; stored as `FALSE` for everything
+  else.
 
 ## Value
 

@@ -3,14 +3,13 @@
 Drives
 [`ir_extract_windows()`](https://bbtheo.github.io/cuplyr/reference/ir_extract_windows.md)
 to full fixed point (every window call resolved) for each verb-level
-"dot" in `exprs`, applying the multi-dot chunking rule from
-`scratchpad/phase5_window_design.md` section 1.2: dots are processed in
-order and batched together (decomposed jointly, sharing CSE and stage
-passes) UNLESS a later dot's window-call arguments reference an earlier
-dot's OWN output column name (from the *current* batch) – in which case
-that later dot starts a new batch, after the finished batch's own dot
-outputs are folded into the running schema as real columns (so the new
-batch can reference them).
+"dot" in `exprs`, applying the multi-dot chunking rule: dots are
+processed in order and batched together (decomposed jointly, sharing CSE
+and stage passes) UNLESS a later dot's window-call arguments reference
+an earlier dot's OWN output column name (from the *current* batch) – in
+which case that later dot starts a new batch, after the finished batch's
+own dot outputs are folded into the running schema as real columns (so
+the new batch can reference them).
 
 ## Usage
 
@@ -38,14 +37,14 @@ plan_window_stages(
 - group_cols:
 
   Character vector of group-by column names (passed through unchanged
-  for a future
+  for
   [`ast_window()`](https://bbtheo.github.io/cuplyr/reference/ast_window.md)
-  to consume – W1's own decomposition logic doesn't need to inspect
-  these at all)
+  to consume – the decomposition logic doesn't need to inspect these at
+  all)
 
 - sums:
 
-  (F42) How an integer/logical window
+  How an integer/logical window
   [`sum()`](https://rdrr.io/r/base/sum.html) is typed. `"int"`
   (default): INT32, as dplyr's integer sum. `"lenient"` (lazy
   [`filter()`](https://dplyr.tidyverse.org/reference/filter.html), whose
@@ -76,5 +75,5 @@ plan_window_stages(
 
 This is a pure planning function: it builds the stage/spec/pre-mutate
 structures a verb will later turn into actual `ast_mutate`/`ast_window`
-nodes (section 1.3; not implemented until W2/W3) – no AST node is built
-here, and nothing is pushed onto any `tbl_gpu`.
+nodes – no AST node is built here, and nothing is pushed onto any
+`tbl_gpu`.

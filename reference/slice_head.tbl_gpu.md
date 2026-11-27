@@ -1,14 +1,13 @@
 # Select the first rows
 
-Keeps the first `n` (or `prop` fraction of) rows of a GPU table, similar
-to
-[`dplyr::slice_head()`](https://dplyr.tidyverse.org/reference/slice.html).
-Ungrouped,
-[`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html)-grouped,
-and `by=` calls all run entirely on the GPU (Phase 5, task W7):
-ungrouped via `cudf::slice()`; grouped/`by=` via a per-group window
-desugar (see R/slice.R's module docs for the exact
-group-ordering/NA-handling rules).
+Keeps the first `n` (or `prop` fraction of) rows of a GPU table, as
+[`dplyr::slice_head()`](https://dplyr.tidyverse.org/reference/slice.html)
+does. It runs on the GPU, ungrouped, after
+[`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html) and
+with `by`. Grouped results come group by group, as in dplyr: in
+ascending group-key order (an `NA` key last) after
+[`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html), and
+in the order each group first appears in `.data` with `by`.
 
 ## Usage
 
@@ -42,12 +41,12 @@ slice_head(.data, ..., n, prop, by = NULL)
 
 - by:
 
-  Optional on-the-fly grouping columns, GPU-native (Phase 5, task W7):
-  result rows are ordered by each group's FIRST-APPEARANCE position in
-  `.data` (see module docs), and the result is always ungrouped.
-  Supplying `by` when `.data` is already grouped (via
+  Optional grouping columns for this call only, run on the GPU. As in
+  dplyr, the result has the groups in the order each one first appears
+  in `.data`, and it is ungrouped. Supplying `by` when `.data` is
+  already grouped (via
   [`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html))
-  is an error, matching dplyr.
+  is an error, as in dplyr.
 
 ## Value
 

@@ -1,8 +1,7 @@
 # CPU fallback methods for dplyr verbs without a GPU-native implementation
 
 `cuplyr` implements every dplyr generic on `tbl_gpu`, but not every one
-of them runs natively on the GPU yet (see `scratchpad/todo.md` for the
-phase-by-phase rollout). The methods documented here provide a
+of them runs natively on the GPU. The methods documented here provide a
 *transparent CPU fallback*: they materialize any pending lazy
 operations,
 [`collect()`](https://dplyr.tidyverse.org/reference/compute.html)
@@ -61,9 +60,7 @@ nest_by(.data, ..., .key = "data", .keep = FALSE)
 ## Details
 
 Verbs whose result isn't a data frame at all (e.g.
-[`dplyr::pull()`](https://dplyr.tidyverse.org/reference/pull.html)'s
-vector,
-[`dplyr::group_split()`](https://dplyr.tidyverse.org/reference/group_split.html)'s
+[`dplyr::group_map()`](https://dplyr.tidyverse.org/reference/group_map.html)'s
 list), or whose result is a data frame containing list-columns with no
 GPU representation (e.g.
 [`dplyr::nest_by()`](https://dplyr.tidyverse.org/reference/nest_by.html),

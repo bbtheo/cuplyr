@@ -7,14 +7,20 @@ both an equi and a non-equi condition. dplyr raises a plain
 `rlang_error`; x is checked before y. Runs on the raw `by` at the verb
 call (before routing to the fallback), so eager, lazy and fallback joins
 all fail the same way. Also raises dplyr's `keep = FALSE` + non-equi
-error first, and stops after x's duplicate check when x lacks a join
-column, so that error (raised later by the join) precedes y's
-duplicates, as in dplyr's `join_cols()`.
+error first, and, per side after its duplicates, dplyr's "Join columns
+in `x` must be present in the data." (so x's missing column precedes y's
+duplicates, as in dplyr's `join_cols()`).
 
 ## Usage
 
 ``` r
-check_join_cols_unique(by, x, keep = NULL, call = rlang::caller_env())
+check_join_cols_unique(
+  by,
+  x,
+  keep = NULL,
+  call = rlang::caller_env(),
+  y = NULL
+)
 ```
 
 ## Arguments
@@ -35,3 +41,7 @@ check_join_cols_unique(by, x, keep = NULL, call = rlang::caller_env())
 - call:
 
   The verb's frame, reported as the error call
+
+- y:
+
+  The right table, or `NULL` to leave its columns unchecked

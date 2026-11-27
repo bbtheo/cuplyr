@@ -16,11 +16,9 @@ R’s garbage collector runs, so in a loop they pile up until the card is
 full and cuplyr’s out-of-memory handler has to step in. In the
 measurements below that made eager 3 to 7 times slower than lazy.
 
-``` r
-
-library(cuplyr)
-library(dplyr)
-```
+\
+[`library`](https://rdrr.io/r/base/library.html)`(`[`cuplyr`](https://github.com/bbtheo/cuplyr)`)`\
+[`library`](https://rdrr.io/r/base/library.html)`(`[`dplyr`](https://dplyr.tidyverse.org)`)`
 
 ## How a cuplyr call runs
 
@@ -56,47 +54,36 @@ Printing a lazy table runs the plan to show its first rows and keeps
 nothing, so it costs about as much as a
 [`collect()`](https://dplyr.tidyverse.org/reference/compute.html).
 
-[`show_query()`](https://dplyr.tidyverse.org/reference/explain.html)
-prints the pending steps of a lazy table.
-[`explain()`](https://dplyr.tidyverse.org/reference/explain.html) also
-prints the plan the optimizer will run.
+[`explain()`](https://dplyr.tidyverse.org/reference/explain.html) prints
+the plan of a lazy table as R code: the plan the optimizer will run.
+`show_query(optimized = FALSE)` prints the steps as you wrote them.
 
-``` r
-
-lazy <- tbl_gpu(mtcars) |>
-  filter(mpg > 20) |>
-  mutate(kpl = mpg * 0.425, hp2 = hp * 2) |>
-  select(cyl, kpl)
-
-explain(lazy)
-#> Pending operations:
-#> ast_select [2 cols]
-#> | ast_mutate [2 expressions]
-#> | | ast_filter [1 predicates]
-#> | | | ast_source [11 cols]
-#>
-#> AST depth: 4
-#> Node count: 4
-#>
-#> Optimized plan:
-#> ast_select [2 cols]
-#> | ast_mutate [1 expressions]
-#> | | ast_filter [1 predicates]
-#> | | | ast_select [2 cols]
-#> | | | | ast_source [11 cols]
-```
+\
+`lazy`` ``<-`` `[`tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md)`(``mtcars``)`` ``|>`\
+`  `[`filter`](https://dplyr.tidyverse.org/reference/filter.html)`(``mpg`` ``>`` ``20``)`` ``|>`\
+`  `[`mutate`](https://dplyr.tidyverse.org/reference/mutate.html)`(``kpl ``=`` ``mpg`` ``*`` ``0.425``, hp2 ``=`` ``hp`` ``*`` ``2``)`` ``|>`\
+`  `[`select`](https://dplyr.tidyverse.org/reference/select.html)`(``cyl``, ``kpl``)`\
+\
+[`explain`](https://dplyr.tidyverse.org/reference/explain.html)`(``lazy``)`\
+`#> <cuplyr plan: optimized>`\
+`#> table on the GPU`\
+`#>   columns read: 2 of 11 (mpg, cyl)`\
+`#> filter(mpg > 20)`\
+`#> mutate(kpl = mpg * 0.425)`\
+`#> select(cyl, kpl)`
 
 In the optimized plan the mutate has one expression instead of two,
-because nothing uses `hp2`. A new select right above the source keeps
-only the 2 columns the filter and the mutate read. Nothing has run on
-the GPU yet. `collect(lazy)` runs the plan.
+because nothing uses `hp2`, and the source line shows that the plan
+reads only 2 of the 11 columns: `mpg` for the filter and the mutate,
+`cyl` for the select. Nothing has run on the GPU yet. `collect(lazy)`
+runs the plan.
 
 [`compute()`](https://dplyr.tidyverse.org/reference/compute.html) and
 [`collect()`](https://dplyr.tidyverse.org/reference/compute.html) run
 six optimizer passes.
 
-- Projection pruning adds a select that keeps only the columns later
-  steps need. This is the inner select above.
+- Projection pruning keeps only the columns later steps need. This is
+  the `columns read: 2 of 11` line above.
 - Mutate fusion merges consecutive
   [`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html) calls
   into one step, keeping the order you wrote. It skips the merge if the
@@ -137,9 +124,9 @@ are barriers. The passes run on each side of them but not across.
 The tables below are static. Nothing is timed when this vignette builds.
 The code is at the end.
 
-- Date and version: 2026-10-26, cuplyr 0.1.1.9000, at the version from
-  the NEWS entry “Faster eager verb calls”. Some figures from earlier
-  versions are quoted for comparison.
+- Date and version: 2026-10-26, cuplyr 0.1.1.9000 (a development version
+  before 0.2.0). Some figures from earlier versions are quoted for
+  comparison.
 - Hardware and software: NVIDIA GeForce RTX 5070 (12 GB), driver
   615.78.08, R 4.6.1, dplyr 1.2.1, the default `async` memory resource.
 - Method: data already on the GPU, so uploads are not in the pipeline
@@ -157,11 +144,9 @@ The code is at the end.
 
 ### A five-verb pipeline
 
-``` r
-
-filter(x > 0.1) |> mutate(z = x * y + w) |> group_by(g) |>
-  summarise(m = mean(z), n = n()) |> arrange(desc(m)) |> collect()
-```
+\
+[`filter`](https://dplyr.tidyverse.org/reference/filter.html)`(``x`` ``>`` ``0.1``)`` ``|>`` `[`mutate`](https://dplyr.tidyverse.org/reference/mutate.html)`(``z ``=`` ``x`` ``*`` ``y`` ``+`` ``w``)`` ``|>`` `[`group_by`](https://dplyr.tidyverse.org/reference/group_by.html)`(``g``)`` ``|>`\
+`  `[`summarise`](https://dplyr.tidyverse.org/reference/summarise.html)`(``m ``=`` `[`mean`](https://rdrr.io/r/base/mean.html)`(``z``)``, n ``=`` `[`n`](https://dplyr.tidyverse.org/reference/context.html)`(``)``)`` ``|>`` `[`arrange`](https://dplyr.tidyverse.org/reference/arrange.html)`(`[`desc`](https://dplyr.tidyverse.org/reference/desc.html)`(``m``)``)`` ``|>`` `[`collect`](https://dplyr.tidyverse.org/reference/compute.html)`(``)`
 
 The table has an integer `g` with 100 groups and double columns `x`, `y`
 and `w`. The dplyr column runs the same pipeline on a tibble. “Held” is
@@ -210,11 +195,9 @@ The result stays on the GPU.
 A 21-column table (`g` plus `x1` to `x20`) and a query that computes
 columns it later drops and filters after the mutate:
 
-``` r
-
-mutate(a = x1 * 2, b = x2 * x3, c = x4 + x5) |> filter(x1 > 0.9) |>
-  select(g, a) |> collect()
-```
+\
+[`mutate`](https://dplyr.tidyverse.org/reference/mutate.html)`(``a ``=`` ``x1`` ``*`` ``2``, b ``=`` ``x2`` ``*`` ``x3``, c ``=`` ``x4`` ``+`` ``x5``)`` ``|>`` `[`filter`](https://dplyr.tidyverse.org/reference/filter.html)`(``x1`` ``>`` ``0.9``)`` ``|>`\
+`  `[`select`](https://dplyr.tidyverse.org/reference/select.html)`(``g``, ``a``)`` ``|>`` `[`collect`](https://dplyr.tidyverse.org/reference/compute.html)`(``)`
 
 [`explain()`](https://dplyr.tidyverse.org/reference/explain.html) shows
 the optimizer reading 2 of the 21 columns, moving the filter below the
@@ -232,8 +215,8 @@ mutate, and dropping `b` and `c`.
   lazy took 1.75 to 1.76 ms against 1.87 to 1.88 at 1e3 rows, and 1.95
   to 1.98 ms against 2.05 to 2.08 at 1e6, 4 to 6% less. At 1e7 rows lazy
   is 0.67 ms behind (5.00 against 4.33 ms, 15%) and at 5e7 rows 1.0 ms
-  behind (18.5 against 17.5 ms, 6%). Before the NEWS entry “Faster lazy
-  verb calls” those two gaps were 1.2 and 1.5 ms.
+  behind (18.5 against 17.5 ms, 6%). Earlier in the 0.2.0 development
+  cycle those two gaps were 1.2 and 1.5 ms.
 - At 1e3 rows, in two profiling runs, recording the five-verb lazy plan
   took 1.0 ms, all of it in R.
   [`collect()`](https://dplyr.tidyverse.org/reference/compute.html) took
@@ -349,59 +332,57 @@ fresh session on an idle GPU. Batch sizes come from one timed call that
 the 1 ms timer rounds, so batches of sub-millisecond calls can run well
 under or over the 30 ms target.
 
-``` r
-
-library(cuplyr)
-library(dplyr)
-set.seed(1)
-
-# Median ms per call. A sample is a batch of calls fenced with gpu_sync();
-# gc() runs untimed before every batch.
-per_call <- function(fn, samples = 15, warmup = 3, target = 0.03) {
-  for (i in seq_len(warmup)) fn()
-  gpu_sync(); gc(verbose = FALSE)
-  t0 <- proc.time()[["elapsed"]]; fn(); gpu_sync()
-  one <- max(proc.time()[["elapsed"]] - t0, 1e-4)
-  reps <- max(1L, min(500L, as.integer(ceiling(target / one))))
-  t <- vapply(seq_len(samples), function(i) {
-    gc(verbose = FALSE)
-    t0 <- proc.time()[["elapsed"]]
-    for (j in seq_len(reps)) fn()
-    gpu_sync()
-    (proc.time()[["elapsed"]] - t0) / reps
-  }, numeric(1))
-  1e3 * median(t)
-}
-
-# GPU memory one call leaves allocated until R's next gc(), in MB.
-held_mb <- function(fn) {
-  gc(verbose = FALSE); gc(verbose = FALSE); gpu_sync()
-  u0 <- gpu_memory_state()$pool_used_bytes
-  r <- fn(); gpu_sync()
-  u1 <- gpu_memory_state()$pool_used_bytes
-  rm(r)
-  (u1 - u0) / 1e6
-}
-
-pipeline <- function(d) {
-  d |>
-    filter(x > 0.1) |>
-    mutate(z = x * y + w) |>
-    group_by(g) |>
-    summarise(m = mean(z), n = n()) |>
-    arrange(desc(m))
-}
-
-n <- 1e6
-df <- data.frame(g = sample.int(100L, n, TRUE), x = runif(n), y = runif(n),
-                 w = rnorm(n))
-tb <- tibble::as_tibble(df)
-eg <- tbl_gpu(df, lazy = FALSE)
-lz <- tbl_gpu(df, lazy = TRUE)
-
-c(eager = per_call(function() collect(pipeline(eg))),
-  lazy  = per_call(function() collect(pipeline(lz))),
-  dplyr = per_call(function() pipeline(tb)))
-c(eager = held_mb(function() collect(pipeline(eg))),
-  lazy  = held_mb(function() collect(pipeline(lz))))
-```
+\
+[`library`](https://rdrr.io/r/base/library.html)`(`[`cuplyr`](https://github.com/bbtheo/cuplyr)`)`\
+[`library`](https://rdrr.io/r/base/library.html)`(`[`dplyr`](https://dplyr.tidyverse.org)`)`\
+[`set.seed`](https://rdrr.io/r/base/Random.html)`(``1``)`\
+\
+`# Median ms per call. A sample is a batch of calls fenced with gpu_sync();`\
+`# gc() runs untimed before every batch.`\
+`per_call`` ``<-`` ``function``(``fn``, ``samples`` ``=`` ``15``, ``warmup`` ``=`` ``3``, ``target`` ``=`` ``0.03``)`` ``{`\
+`  ``for`` ``(``i`` ``in`` `[`seq_len`](https://rdrr.io/r/base/seq.html)`(``warmup``)``)`` ``fn``(``)`\
+`  `[`gpu_sync`](https://bbtheo.github.io/cuplyr/reference/gpu_sync.md)`(``)``; `[`gc`](https://rdrr.io/r/base/gc.html)`(``verbose ``=`` ``FALSE``)`\
+`  ``t0`` ``<-`` `[`proc.time`](https://rdrr.io/r/base/proc.time.html)`(``)``[[``"elapsed"``]``]``; ``fn``(``)``; `[`gpu_sync`](https://bbtheo.github.io/cuplyr/reference/gpu_sync.md)`(``)`\
+`  ``one`` ``<-`` `[`max`](https://rdrr.io/r/base/Extremes.html)`(`[`proc.time`](https://rdrr.io/r/base/proc.time.html)`(``)``[[``"elapsed"``]``]`` ``-`` ``t0``, ``1e-4``)`\
+`  ``reps`` ``<-`` `[`max`](https://rdrr.io/r/base/Extremes.html)`(``1L``, `[`min`](https://rdrr.io/r/base/Extremes.html)`(``500L``, `[`as.integer`](https://rdrr.io/r/base/integer.html)`(`[`ceiling`](https://rdrr.io/r/base/Round.html)`(``target`` ``/`` ``one``)``)``)``)`\
+`  ``t`` ``<-`` `[`vapply`](https://rdrr.io/r/base/lapply.html)`(`[`seq_len`](https://rdrr.io/r/base/seq.html)`(``samples``)``, ``function``(``i``)`` ``{`\
+`    `[`gc`](https://rdrr.io/r/base/gc.html)`(``verbose ``=`` ``FALSE``)`\
+`    ``t0`` ``<-`` `[`proc.time`](https://rdrr.io/r/base/proc.time.html)`(``)``[[``"elapsed"``]``]`\
+`    ``for`` ``(``j`` ``in`` `[`seq_len`](https://rdrr.io/r/base/seq.html)`(``reps``)``)`` ``fn``(``)`\
+`    `[`gpu_sync`](https://bbtheo.github.io/cuplyr/reference/gpu_sync.md)`(``)`\
+`    ``(`[`proc.time`](https://rdrr.io/r/base/proc.time.html)`(``)``[[``"elapsed"``]``]`` ``-`` ``t0``)`` ``/`` ``reps`\
+`  ``}``, `[`numeric`](https://rdrr.io/r/base/numeric.html)`(``1``)``)`\
+`  ``1e3`` ``*`` `[`median`](https://rdrr.io/r/stats/median.html)`(``t``)`\
+`}`\
+\
+`# GPU memory one call leaves allocated until R's next gc(), in MB.`\
+`held_mb`` ``<-`` ``function``(``fn``)`` ``{`\
+`  `[`gc`](https://rdrr.io/r/base/gc.html)`(``verbose ``=`` ``FALSE``)``; `[`gc`](https://rdrr.io/r/base/gc.html)`(``verbose ``=`` ``FALSE``)``; `[`gpu_sync`](https://bbtheo.github.io/cuplyr/reference/gpu_sync.md)`(``)`\
+`  ``u0`` ``<-`` `[`gpu_memory_state`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_state.md)`(``)``$``pool_used_bytes`\
+`  ``r`` ``<-`` ``fn``(``)``; `[`gpu_sync`](https://bbtheo.github.io/cuplyr/reference/gpu_sync.md)`(``)`\
+`  ``u1`` ``<-`` `[`gpu_memory_state`](https://bbtheo.github.io/cuplyr/reference/gpu_memory_state.md)`(``)``$``pool_used_bytes`\
+`  `[`rm`](https://rdrr.io/r/base/rm.html)`(``r``)`\
+`  ``(``u1`` ``-`` ``u0``)`` ``/`` ``1e6`\
+`}`\
+\
+`pipeline`` ``<-`` ``function``(``d``)`` ``{`\
+`  ``d`` ``|>`\
+`    `[`filter`](https://dplyr.tidyverse.org/reference/filter.html)`(``x`` ``>`` ``0.1``)`` ``|>`\
+`    `[`mutate`](https://dplyr.tidyverse.org/reference/mutate.html)`(``z ``=`` ``x`` ``*`` ``y`` ``+`` ``w``)`` ``|>`\
+`    `[`group_by`](https://dplyr.tidyverse.org/reference/group_by.html)`(``g``)`` ``|>`\
+`    `[`summarise`](https://dplyr.tidyverse.org/reference/summarise.html)`(``m ``=`` `[`mean`](https://rdrr.io/r/base/mean.html)`(``z``)``, n ``=`` `[`n`](https://dplyr.tidyverse.org/reference/context.html)`(``)``)`` ``|>`\
+`    `[`arrange`](https://dplyr.tidyverse.org/reference/arrange.html)`(`[`desc`](https://dplyr.tidyverse.org/reference/desc.html)`(``m``)``)`\
+`}`\
+\
+`n`` ``<-`` ``1e6`\
+`df`` ``<-`` `[`data.frame`](https://rdrr.io/r/base/data.frame.html)`(``g ``=`` `[`sample.int`](https://rdrr.io/r/base/sample.html)`(``100L``, ``n``, ``TRUE``)``, x ``=`` `[`runif`](https://rdrr.io/r/stats/Uniform.html)`(``n``)``, y ``=`` `[`runif`](https://rdrr.io/r/stats/Uniform.html)`(``n``)``,`\
+`                 w ``=`` `[`rnorm`](https://rdrr.io/r/stats/Normal.html)`(``n``)``)`\
+`tb`` ``<-`` ``tibble``::`[`as_tibble`](https://tibble.tidyverse.org/reference/as_tibble.html)`(``df``)`\
+`eg`` ``<-`` `[`tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md)`(``df``, lazy ``=`` ``FALSE``)`\
+`lz`` ``<-`` `[`tbl_gpu`](https://bbtheo.github.io/cuplyr/reference/tbl_gpu.md)`(``df``, lazy ``=`` ``TRUE``)`\
+\
+[`c`](https://rdrr.io/r/base/c.html)`(``eager ``=`` ``per_call``(``function``(``)`` `[`collect`](https://dplyr.tidyverse.org/reference/compute.html)`(``pipeline``(``eg``)``)``)``,`\
+`  lazy  ``=`` ``per_call``(``function``(``)`` `[`collect`](https://dplyr.tidyverse.org/reference/compute.html)`(``pipeline``(``lz``)``)``)``,`\
+`  dplyr ``=`` ``per_call``(``function``(``)`` ``pipeline``(``tb``)``)``)`\
+[`c`](https://rdrr.io/r/base/c.html)`(``eager ``=`` ``held_mb``(``function``(``)`` `[`collect`](https://dplyr.tidyverse.org/reference/compute.html)`(``pipeline``(``eg``)``)``)``,`\
+`  lazy  ``=`` ``held_mb``(``function``(``)`` `[`collect`](https://dplyr.tidyverse.org/reference/compute.html)`(``pipeline``(``lz``)``)``)``)`

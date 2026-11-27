@@ -9,8 +9,8 @@ schema, unlike tbl$schema) actually differs from the target – the
 common case (x/y already schema-identical) skips both entirely,
 preserving whatever laziness tbl already had. Names/types alone don't
 catch every case that needs a real align pass: two DICTIONARY32
-columns can share the type string while their level VECTORS differ
-(Bug 2's native remap path), so factor_levels_match_target()
+columns can share the type string while their level vectors differ
+(the level-union remap path), so factor_levels_match_target()
 (R/bind.R) is checked too. align_to_schema()'s own return also
 resets $groups to character() – restored here from the
 caller-supplied groups; its $schema$factor_levels is reset to
@@ -26,8 +26,8 @@ schema, unlike tbl$schema) actually differs from the target – the
 common case (x/y already schema-identical) skips both entirely,
 preserving whatever laziness tbl already had. Names/types alone don't
 catch every case that needs a real align pass: two DICTIONARY32
-columns can share the type string while their level VECTORS differ
-(Bug 2's native remap path), so factor_levels_match_target()
+columns can share the type string while their level vectors differ
+(the level-union remap path), so factor_levels_match_target()
 (R/bind.R) is checked too. align_to_schema()'s own return also
 resets $groups to character() – restored here from the
 caller-supplied groups; its $schema$factor_levels is reset to
@@ -41,7 +41,7 @@ already-computed target_schema$factor_levels for consistency either way."><meta 
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -85,8 +85,8 @@ schema, unlike <code>tbl$schema</code>) actually differs from the target – the
 common case (x/y already schema-identical) skips both entirely,
 preserving whatever laziness <code>tbl</code> already had. Names/types alone don't
 catch every case that needs a real align pass: two <code>DICTIONARY32</code>
-columns can share the type string while their level VECTORS differ
-(Bug 2's native remap path), so <code><a href="factor_levels_match_target.html">factor_levels_match_target()</a></code>
+columns can share the type string while their level vectors differ
+(the level-union remap path), so <code><a href="factor_levels_match_target.html">factor_levels_match_target()</a></code>
 (R/bind.R) is checked too. <code><a href="align_to_schema.html">align_to_schema()</a></code>'s own return also
 resets <code>$groups</code> to <code><a href="https://rdrr.io/r/base/character.html" class="external-link">character()</a></code> – restored here from the
 caller-supplied <code>groups</code>; its <code>$schema$factor_levels</code> is reset to

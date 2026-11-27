@@ -6,18 +6,18 @@ these five share the same &quot;select a subset of rows, in some order,
 from a single input&quot; shape and (mostly) the same n=/prop= sizing
 rule, so one node with a mode-specific field set avoids several
 near-identical constructors/lowering functions/optimizer barrier
-entries. slice_sample() and every grouped variant are out of scope
-for this node (Phase 3 scope decision, see R/slice.R) and keep using
-the CPU fallback (R/fallback.R) instead."><meta property="og:description" content="One node type covers the whole slice family (slice()/slice_head()/
+entries. slice_sample() isn't built on this node (see
+slice_sample_native() in R/slice.R), and a slice the GPU path doesn't
+cover is run by the CPU fallback (R/fallback.R) instead."><meta property="og:description" content="One node type covers the whole slice family (slice()/slice_head()/
 slice_tail()/slice_min()/slice_max()), distinguished by mode –
 unlike most other verbs (which each get their own ast_* constructor),
 these five share the same &quot;select a subset of rows, in some order,
 from a single input&quot; shape and (mostly) the same n=/prop= sizing
 rule, so one node with a mode-specific field set avoids several
 near-identical constructors/lowering functions/optimizer barrier
-entries. slice_sample() and every grouped variant are out of scope
-for this node (Phase 3 scope decision, see R/slice.R) and keep using
-the CPU fallback (R/fallback.R) instead."><meta property="og:image" content="https://bbtheo.github.io/cuplyr/logo.png"></head><body>
+entries. slice_sample() isn't built on this node (see
+slice_sample_native() in R/slice.R), and a slice the GPU path doesn't
+cover is run by the CPU fallback (R/fallback.R) instead."><meta property="og:image" content="https://bbtheo.github.io/cuplyr/logo.png"></head><body>
     <a href="#main" class="visually-hidden-focusable">Skip to contents</a>
 
 
@@ -25,7 +25,7 @@ the CPU fallback (R/fallback.R) instead."><meta property="og:image" content="htt
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -66,9 +66,9 @@ these five share the same "select a subset of rows, in some order,
 from a single input" shape and (mostly) the same <code>n=</code>/<code>prop=</code> sizing
 rule, so one node with a mode-specific field set avoids several
 near-identical constructors/lowering functions/optimizer barrier
-entries. <code><a href="https://dplyr.tidyverse.org/reference/slice.html" class="external-link">slice_sample()</a></code> and every <em>grouped</em> variant are out of scope
-for this node (Phase 3 scope decision, see <code>R/slice.R</code>) and keep using
-the CPU fallback (<code>R/fallback.R</code>) instead.</p>
+entries. <code><a href="https://dplyr.tidyverse.org/reference/slice.html" class="external-link">slice_sample()</a></code> isn't built on this node (see
+<code><a href="slice_sample_native.html">slice_sample_native()</a></code> in <code>R/slice.R</code>), and a slice the GPU path doesn't
+cover is run by the CPU fallback (<code>R/fallback.R</code>) instead.</p>
     </div>
 
     <div class="section level2">
@@ -165,7 +165,7 @@ raised when it is resolved at lowering</p></dd>
 
 
 <dt id="arg-group-cols-by-first">group_cols, by_first<a class="anchor" aria-label="anchor" href="#arg-group-cols-by-first"></a></dt>
-<dd><p>For <code>mode == "rank_grouped"</code> (F115, a grouped
+<dd><p>For <code>mode == "rank_grouped"</code> (a grouped
 <code><a href="https://dplyr.tidyverse.org/reference/slice.html" class="external-link">slice_min()</a></code>/<code><a href="https://dplyr.tidyverse.org/reference/slice.html" class="external-link">slice_max()</a></code> on a numeric or date key, run by
 <code>gpu_slice_rank_grouped()</code>): the grouping columns, and whether the groups
 come out in order of their first row (<code>by=</code>/<code>.by=</code>) rather than sorted by

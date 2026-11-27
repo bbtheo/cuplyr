@@ -1,20 +1,18 @@
-# Route a join call to the transparent CPU fallback (Phase 7 J6)
+# Route a join call to the transparent CPU fallback
 
-Shared by every mutating/semi/anti join verb below for the two shapes
-the native GPU path can't (yet, or ever) handle:
+Shared by every join verb for the shapes the native GPU path doesn't
+handle, among them:
 
-1.  A non-equi
-    [`join_by()`](https://dplyr.tidyverse.org/reference/join_by.html)
-    object
-    ([`join_by_is_non_equi()`](https://bbtheo.github.io/cuplyr/reference/join_by_is_non_equi.md)
-    is `TRUE`) – Phase 7 J7 replaces this with a native
-    `mixed_join`/`conditional_join` lowering; until then this keeps user
-    code working exactly like every other not-yet-native verb (mirrors
+1.  A [`join_by()`](https://dplyr.tidyverse.org/reference/join_by.html)
+    that
+    [`join_by_natively_supported()`](https://bbtheo.github.io/cuplyr/reference/join_by_natively_supported.md)
+    rejects (several `closest()` conditions, a string compared with a
+    non-string, ...): collect the other table, then run the real dplyr
+    verb on `.data`'s own materialized/grouped tibble via
+    [`gpu_fallback()`](https://bbtheo.github.io/cuplyr/reference/gpu_fallback.md)
+    (the same two-table shape as
     [`nest_join()`](https://dplyr.tidyverse.org/reference/nest_join.html)'s
-    two-table fallback shape, `R/fallback.R`: collect the OTHER table,
-    then run the real dplyr verb on `.data`'s own materialized/grouped
-    tibble via
-    [`gpu_fallback()`](https://bbtheo.github.io/cuplyr/reference/gpu_fallback.md)).
+    fallback, `R/fallback.R`).
 
 2.  The `suffix = c("", ...)` degenerate name-collision case detected by
     [`join_output_would_collide()`](https://bbtheo.github.io/cuplyr/reference/join_output_would_collide.md)

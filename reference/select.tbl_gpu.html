@@ -9,7 +9,7 @@ dplyr::select(). Supports tidyselect syntax for flexible column selection."><met
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -74,7 +74,8 @@ column types. Any other predicate (<code>where(~ anyNA(.x))</code>,
 <code><a href="https://lubridate.tidyverse.org/reference/date_utils.html" class="external-link">lubridate::is.Date</a></code>), and any call that is not a tidyselect helper
 or a base name builder (<code>sort(names(x))</code>, <code><a href="https://rdrr.io/r/base/paste.html" class="external-link">paste0()</a></code>, <code><a href="https://rdrr.io/r/base/rev.html" class="external-link">rev()</a></code>,
 <code><a href="https://generics.r-lib.org/reference/setops.html" class="external-link">setdiff()</a></code>, <code>.data$x</code>, ... with safe arguments), is resolved on the
-data: a notified CPU fallback that collects the table</p></li>
+data: the table is collected and the selection runs in dplyr on
+the CPU (see <a href="cuplyr-fallback.html">cuplyr-fallback</a> to be told when)</p></li>
 <li><p>Helpers: <code><a href="https://tidyselect.r-lib.org/reference/starts_with.html" class="external-link">starts_with()</a></code>, <code><a href="https://tidyselect.r-lib.org/reference/starts_with.html" class="external-link">ends_with()</a></code>, <code><a href="https://tidyselect.r-lib.org/reference/starts_with.html" class="external-link">contains()</a></code>, etc.</p></li>
 <li><p>Renaming while selecting: <code>select(new_name = old_name)</code></p></li>
 </ul></dd>
@@ -93,11 +94,9 @@ The original data remains in GPU memory until garbage collected.</p><div class="
 <h3 id="renaming">Renaming<a class="anchor" aria-label="anchor" href="#renaming"></a></h3>
 
 
-<p><code>select(new_name = old_name)</code> both selects and renames <code>old_name</code>. This
-is schema-only (see <code><a href="rename.tbl_gpu.html">rename.tbl_gpu()</a></code>): the underlying selection still
-runs as one <code>gpu_select()</code> gather, with the rename applied on top of it
-as a separate, schema-only <code><a href="ast_rename.html">ast_rename()</a></code> step whenever the tidyselect
-resolution renamed a column.</p>
+<p><code>select(new_name = old_name)</code> both selects and renames <code>old_name</code>. The
+selection runs on the GPU as usual; the rename only changes the column
+names, as <code><a href="rename.tbl_gpu.html">rename.tbl_gpu()</a></code> does.</p>
 </div>
 
 <div class="section">

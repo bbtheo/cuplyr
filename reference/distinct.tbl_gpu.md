@@ -1,10 +1,10 @@
-# Keep only distinct/unique rows of a GPU table
+# Keep distinct rows
 
-Removes duplicate rows from a GPU table, similar to
-[`dplyr::distinct()`](https://dplyr.tidyverse.org/reference/distinct.html).
-Runs entirely on the GPU (`cudf::stable_distinct()`), keeping the first
-occurrence of each distinct key and preserving original row order,
-matching dplyr's contract exactly.
+[`distinct()`](https://dplyr.tidyverse.org/reference/distinct.html)
+keeps the first row of each distinct combination of values, in their
+original order, as
+[`dplyr::distinct()`](https://dplyr.tidyverse.org/reference/distinct.html)
+does. It runs on the GPU.
 
 ## Usage
 
@@ -25,22 +25,20 @@ distinct(.data, ..., .keep_all = FALSE)
   Optional variables to use when determining uniqueness. When every dot
   is an unnamed column reference (`distinct(df, x, .data$y)`) the keys
   are those columns, looked up by name without evaluating anything. When
-  any dot is named or computed (`distinct(df, z = x + 1)`), every dot is
-  parsed through the same expression IR
-  [`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html) uses
-  (see `R/ir.R`) and any computed expressions are evaluated once via an
-  internal
-  [`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html) step
-  before the dedup runs. If omitted, uniqueness is determined using all
-  columns.
+  any dot is named or computed (`distinct(df, z = x + 1)`), the computed
+  keys are added as in
+  [`mutate.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/mutate.tbl_gpu.md)
+  before the duplicates are dropped; a key expression the GPU can't
+  compute runs the whole call in dplyr on the CPU. If omitted,
+  uniqueness is determined using all columns.
 
 - .keep_all:
 
   If `TRUE`, keeps all columns (in their original order, with any newly
-  computed key columns appended at the end, matching
-  [`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html)'s own
-  append/replace rule). If `FALSE` (the default), only the columns used
-  for the uniqueness check are kept, in the order given in `...`.
+  computed key columns appended at the end, as
+  [`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html) adds
+  them). If `FALSE` (the default), only the columns used for the
+  uniqueness check are kept, in the order given in `...`.
 
 ## Value
 
@@ -50,30 +48,24 @@ A `tbl_gpu` object with duplicate rows removed.
 
 ### Column selection and order
 
-With no `...`, every column is the dedup key and every column is kept
-(`.keep_all` has no effect in this case – it's already equivalent). With
-`...`, the output's columns (when `.keep_all = FALSE`) are exactly the
-named/deparsed `...` expressions, in the order given – e.g.
-`distinct(df, y, x)` returns columns `y, x`, not `x, y`.
+With no `...`, every column is the key and every column is kept
+(`.keep_all` makes no difference then). With `...`, the output's columns
+(when `.keep_all = FALSE`) are exactly the `...` expressions, in the
+order given: `distinct(df, y, x)` returns columns `y, x`, not `x, y`.
 
 ### Grouped tables
 
-If `.data` is grouped, the group columns are always part of the dedup
-key and always appear in the result, even if not named in `...` – dplyr
-prepends any group columns missing from `...` ahead of the `...` columns
-(a group column already present in `...` keeps its given position rather
-than being duplicated at the front). Grouping metadata (`$groups`) is
-preserved on the result.
+If `.data` is grouped, the grouping columns are always part of the key
+and always appear in the result, even if not named in `...`: as in
+dplyr, grouping columns missing from `...` come first, ahead of the
+`...` columns (a grouping column already in `...` keeps its position).
+The result keeps the grouping of `.data`.
 
 ### NA and NaN
 
-Two `NA` key values are considered equal (one `NA` row survives), and
-two (computed) `NaN` key values are likewise considered equal – both
-match
-[`dplyr::distinct()`](https://dplyr.tidyverse.org/reference/distinct.html)'s
-behavior, and are cudf's own defaults for `stable_distinct()`
-(`null_equality::EQUAL`, `nan_equality::ALL_EQUAL`), so no
-special-casing is needed here.
+Two `NA` key values are equal (one `NA` row survives), and so are two
+`NaN` key values, as in
+[`dplyr::distinct()`](https://dplyr.tidyverse.org/reference/distinct.html).
 
 ## See also
 

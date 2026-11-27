@@ -19,7 +19,7 @@ only needs to return every column name (grouped or not); group_vars()
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -93,7 +93,7 @@ the contrasting case, R/count.R). Before this method existed,
 (<code>UseMethod("tbl_vars")</code> found no applicable method for a plain-list
 <code>tbl_gpu</code> object, and the generic's own <code>tbl_vars.default</code> doesn't apply
 since <code>tbl_gpu</code> isn't a data.frame subclass).</p>
-<p><code><a href="https://dplyr.tidyverse.org/reference/tbl_vars.html" class="external-link">dplyr::tbl_nongroup_vars()</a></code> (Phase 9, task 1) is a plain, non-generic
+<p><code><a href="https://dplyr.tidyverse.org/reference/tbl_vars.html" class="external-link">dplyr::tbl_nongroup_vars()</a></code> is a plain, non-generic
 function defined purely in terms of <code>setdiff(tbl_vars(x), group_vars(x))</code> – it works transparently for <code>tbl_gpu</code> via this method
 plus <code><a href="group_vars.tbl_gpu.html">group_vars.tbl_gpu()</a></code>, with no <code>tbl_gpu</code>-specific code of its own.</p>
     </div>

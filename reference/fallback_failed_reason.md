@@ -1,4 +1,4 @@
-# The reason a verb call's dot goes to the CPU (F88)
+# The reason a verb call's dot goes to the CPU
 
 Reads what the call's own decision recorded (see the collector notes in
 `R/fallback.R`): the reason claimed for the failing dot, with that dot's

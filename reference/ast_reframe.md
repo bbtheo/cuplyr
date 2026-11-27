@@ -1,8 +1,8 @@
 # Create a reframe AST node
 
 The LONG step of a native
-[`reframe()`](https://dplyr.tidyverse.org/reference/reframe.html) (F22,
-`R/reframe.R`): reshapes the wide one-row-per-group table `input` into
+[`reframe()`](https://dplyr.tidyverse.org/reference/reframe.html)
+(`R/reframe.R`): reshapes the wide one-row-per-group table `input` into
 `k` rows per group.
 
 ## Usage

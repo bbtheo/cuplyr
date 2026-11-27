@@ -1,4 +1,4 @@
-# Infer the time zone of a POSIXct-valued IR node (F32)
+# Infer the time zone of a POSIXct-valued IR node
 
 The sibling of
 [`ir_infer_type()`](https://bbtheo.github.io/cuplyr/reference/ir_infer_type.md)

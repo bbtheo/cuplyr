@@ -1,4 +1,4 @@
-# Signal a type combination the GPU does not compute like dplyr (F48)
+# Signal a type combination the GPU does not compute like dplyr
 
 Same shape as
 [`stop_timestamp_needs_cpu()`](https://bbtheo.github.io/cuplyr/reference/stop_timestamp_needs_cpu.md)

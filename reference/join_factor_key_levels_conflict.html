@@ -10,9 +10,7 @@ alone, before any GPU op runs – every join verb (left_join()/
 inner_join()/full_join()/right_join()/semi_join()/anti_join())
 calls this right after resolve_join_key_types() and routes the WHOLE join
 to the CPU fallback when it's TRUE, mirroring
-join_output_would_collide()'s existing pattern (Phase 8 sets.R
-precedent: check_set_op_compatible() uses the identical
-identical-levels-vs-not split to decide native vs. fallback).
+join_output_would_collide()'s existing pattern.
 Both-factor-with-IDENTICAL-levels keys compare correctly natively (same
 code domain) and are not flagged here."><meta property="og:description" content="Native GPU joins match equi keys by comparing their PHYSICAL INT32 codes
 directly (resolve_join_key_types() only checks identical()/numeric-
@@ -25,9 +23,7 @@ alone, before any GPU op runs – every join verb (left_join()/
 inner_join()/full_join()/right_join()/semi_join()/anti_join())
 calls this right after resolve_join_key_types() and routes the WHOLE join
 to the CPU fallback when it's TRUE, mirroring
-join_output_would_collide()'s existing pattern (Phase 8 sets.R
-precedent: check_set_op_compatible() uses the identical
-identical-levels-vs-not split to decide native vs. fallback).
+join_output_would_collide()'s existing pattern.
 Both-factor-with-IDENTICAL-levels keys compare correctly natively (same
 code domain) and are not flagged here."><meta property="og:image" content="https://bbtheo.github.io/cuplyr/logo.png"></head><body>
     <a href="#main" class="visually-hidden-focusable">Skip to contents</a>
@@ -37,7 +33,7 @@ code domain) and are not flagged here."><meta property="og:image" content="https
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -82,9 +78,7 @@ alone, before any GPU op runs – every join verb (<code><a href="https://dplyr.
 <code><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">inner_join()</a></code>/<code><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">full_join()</a></code>/<code><a href="https://dplyr.tidyverse.org/reference/mutate-joins.html" class="external-link">right_join()</a></code>/<code><a href="https://dplyr.tidyverse.org/reference/filter-joins.html" class="external-link">semi_join()</a></code>/<code><a href="https://dplyr.tidyverse.org/reference/filter-joins.html" class="external-link">anti_join()</a></code>)
 calls this right after <code><a href="resolve_join_key_types.html">resolve_join_key_types()</a></code> and routes the WHOLE join
 to the CPU fallback when it's <code>TRUE</code>, mirroring
-<code><a href="join_output_would_collide.html">join_output_would_collide()</a></code>'s existing pattern (Phase 8 sets.R
-precedent: <code><a href="check_set_op_compatible.html">check_set_op_compatible()</a></code> uses the identical
-identical-levels-vs-not split to decide native vs. fallback).
+<code><a href="join_output_would_collide.html">join_output_would_collide()</a></code>'s existing pattern.
 Both-factor-with-IDENTICAL-levels keys compare correctly natively (same
 code domain) and are not flagged here.</p>
     </div>

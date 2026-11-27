@@ -9,10 +9,11 @@ rows, in some order, from a single input" shape and (mostly) the same
 `n=`/`prop=` sizing rule, so one node with a mode-specific field set
 avoids several near-identical constructors/lowering functions/optimizer
 barrier entries.
-[`slice_sample()`](https://dplyr.tidyverse.org/reference/slice.html) and
-every *grouped* variant are out of scope for this node (Phase 3 scope
-decision, see `R/slice.R`) and keep using the CPU fallback
-(`R/fallback.R`) instead.
+[`slice_sample()`](https://dplyr.tidyverse.org/reference/slice.html)
+isn't built on this node (see
+[`slice_sample_native()`](https://bbtheo.github.io/cuplyr/reference/slice_sample_native.md)
+in `R/slice.R`), and a slice the GPU path doesn't cover is run by the
+CPU fallback (`R/fallback.R`) instead.
 
 ## Usage
 
@@ -112,7 +113,7 @@ ast_slice(
 
 - group_cols, by_first:
 
-  For `mode == "rank_grouped"` (F115, a grouped
+  For `mode == "rank_grouped"` (a grouped
   [`slice_min()`](https://dplyr.tidyverse.org/reference/slice.html)/[`slice_max()`](https://dplyr.tidyverse.org/reference/slice.html)
   on a numeric or date key, run by `gpu_slice_rank_grouped()`): the
   grouping columns, and whether the groups come out in order of their

@@ -1,13 +1,13 @@
 # Split a named list of per-dot expressions into window-decomposition batches
 
-Pure index-partitioning: implements section 1.2's chunking rule in
-isolation from
+Pure index-partitioning: implements the chunking rule below in isolation
+from
 [`plan_window_stages()`](https://bbtheo.github.io/cuplyr/reference/plan_window_stages.md)'s
 own stage-building loop, so a verb's own AST-emission wiring
-(`R/mutate.R`'s `mutate_window()`, and the analogous
-`R/filter.R`/`R/slice.R` wiring from W5/W6/W7 onward) can drive
-`decompose_window_group()` batch-by-batch itself – interleaving each
-batch's own materializing verb node between batches, which
+(`R/mutate.R`'s `mutate_window()`, and the analogous wiring in
+`R/filter.R`/`R/slice.R`) can drive `decompose_window_group()`
+batch-by-batch itself – interleaving each batch's own materializing verb
+node between batches, which
 [`plan_window_stages()`](https://bbtheo.github.io/cuplyr/reference/plan_window_stages.md)'s
 single flat call cannot do (see that function's docs: it folds each
 batch's dot outputs into its *own* running schema bookkeeping only, it

@@ -2,9 +2,10 @@
 
 Like
 [`count.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/count.tbl_gpu.md),
-but without any `...`: aggregates exactly the groups `x` already has (or
-all rows, if ungrouped). Sugar over
-[`summarise.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/summarise.tbl_gpu.md).
+but without any `...`: counts the rows of the groups `x` already has (or
+of the whole table, if it is ungrouped). It is one
+[`summarise.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/summarise.tbl_gpu.md)
+call and runs on the GPU.
 
 ## Usage
 
@@ -22,7 +23,7 @@ tally(x, wt = NULL, sort = FALSE, name = NULL)
 
 - wt:
 
-  Optional weight column/expression – as
+  Optional weight column/expression, as
   [`count.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/count.tbl_gpu.md).
 
 - sort:
@@ -32,25 +33,22 @@ tally(x, wt = NULL, sort = FALSE, name = NULL)
 - name:
 
   The name of the count column. If `NULL` (default), uses `"n"`, or
-  `"nn"`/`"nnn"`/... if `"n"` already names one of `x`'s group columns
-  (note: unlike
-  [`add_count.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/add_count.tbl_gpu.md)/[`dplyr::add_tally()`](https://dplyr.tidyverse.org/reference/count.html),
-  this check is against the GROUP columns only, not every column –
-  verified empirically against dplyr 1.2.1, see this file's header
-  comment).
+  `"nn"`/`"nnn"`/... if `"n"` already names one of `x`'s grouping
+  columns. As in dplyr, only the grouping columns are checked, where
+  [`add_count.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/add_count.tbl_gpu.md)
+  and
+  [`dplyr::add_tally()`](https://dplyr.tidyverse.org/reference/count.html)
+  check every column.
 
 ## Value
 
-A `tbl_gpu` with the count column appended. If `x` was grouped by more
-than one column, the result's grouping drops only the LAST grouping
-column (matching
-[`summarise()`](https://dplyr.tidyverse.org/reference/summarise.html)'s
-default `.groups = "drop_last"` behavior for a real `grouped_df` – this
-is [`tally()`](https://dplyr.tidyverse.org/reference/count.html)'s own
-rule, and is NOT the same as
-[`count.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/count.tbl_gpu.md)'s
-"restore original grouping in full" rule; see this file's header
-comment).
+A `tbl_gpu` with one row per group: the grouping columns and the count
+column. As after
+[`summarise()`](https://dplyr.tidyverse.org/reference/summarise.html),
+the result drops the last grouping column and keeps the others; this
+differs from
+[`count.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/count.tbl_gpu.md),
+which keeps `x`'s grouping in full.
 
 ## See also
 

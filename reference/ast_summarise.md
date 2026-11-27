@@ -11,7 +11,7 @@ ast_summarise(
   groups,
   result_groups = character(),
   on_sum_overflow = "error",
-  sort_groups = TRUE
+  group_order = "keys"
 )
 ```
 
@@ -33,35 +33,34 @@ ast_summarise(
 
 - result_groups:
 
-  Character vector of group columns RETAINED on the summarise's *output*
-  (Phase 6, task 3): a subset of `groups`, computed from `.groups=`
-  semantics by `resolve_summarise_groups()` (R/summarise.R) –
+  Character vector of group columns RETAINED on the summarise's
+  *output*: a subset of `groups`, computed from `.groups=` semantics by
+  `resolve_summarise_groups()` (R/summarise.R) –
   [`character()`](https://rdrr.io/r/base/character.html) for
   `.groups = "drop"`/ungrouped input, all of `groups` for `"keep"`,
   all-but-the-last for the default/ `"drop_last"`. Read by
   [`propagate_groups()`](https://bbtheo.github.io/cuplyr/reference/propagate_groups.md)
-  (R/execute.R) instead of the old hardcoded "summarise always drops all
-  groups" rule.
+  (R/execute.R).
 
 - on_sum_overflow:
 
-  (F34) What to do when an integer/logical
+  What to do when an integer/logical
   [`sum()`](https://rdrr.io/r/base/sum.html) leaves R's integer range at
   execution. `"double"`: the column comes back FLOAT64, as in dplyr
   (eager mode reconciles the schema from the result). `"error"` (lazy
   plans, whose schema was declared INT32 statically): raise
   `cuplyr_error_sum_overflow`. A lazy
   [`summarise()`](https://dplyr.tidyverse.org/reference/summarise.html)
-  plans only a sum of a logical this way (F80): an INT32 sum runs at the
-  verb with `"double"`.
+  plans only a sum of a logical this way: an INT32 sum runs at the verb
+  with `"double"`.
 
-- sort_groups:
+- group_order:
 
-  (F33) Sort the grouped result by the group keys (ascending, `NA`
-  last), dplyr's
+  Row order of a grouped result: `"keys"` sorts by the group keys
+  (ascending, `NA` last), dplyr's
   [`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html)
-  order. `FALSE` only for `summarise_by_desugar()`, which re-sorts by
-  first appearance anyway.
+  order; `"first"` (#50) orders groups by first appearance, dplyr's
+  `.by =` order, and is what `summarise_by_desugar()` asks for.
 
 ## Value
 

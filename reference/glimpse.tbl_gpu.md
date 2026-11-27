@@ -37,15 +37,10 @@ there is nothing to re-upload.
 
 ## Details
 
-Unlike the (now-removed) Phase 2 CPU-fallback
-[`glimpse()`](https://pillar.r-lib.org/reference/glimpse.html), this
-implementation never collects the whole table to R: any pending lazy
-operations are materialized (via
-[`compute()`](https://dplyr.tidyverse.org/reference/compute.html)), but
-the actual preview data comes from a small, capped row sample (like
-`print.tbl_gpu()`), and row/column counts/types come from lightweight
-metadata calls – never a full
-[`collect()`](https://dplyr.tidyverse.org/reference/compute.html).
+[`glimpse()`](https://pillar.r-lib.org/reference/glimpse.html) never
+collects the whole table to R. The preview values come from a small
+sample of the first rows, copied from the GPU as `print.tbl_gpu()` does,
+and the row and column counts and types come from the table's metadata.
 
 A lazy table with pending operations runs its plan once for the preview
 (the result is freed when
@@ -54,7 +49,8 @@ the table itself is unchanged), and one extra line starting `Lazy:`
 follows `Columns:`. If the plan fails (an error, out of GPU memory),
 [`glimpse()`](https://pillar.r-lib.org/reference/glimpse.html) prints
 `Rows: ??`, the `Lazy:` line, the message and the stored schema instead
-of raising.
+of raising. A plan over a parquet file that does more than select or
+rename columns is not run for the preview.
 
 Column value/type formatting does not attempt to reproduce dplyr's own
 [`glimpse()`](https://pillar.r-lib.org/reference/glimpse.html) output

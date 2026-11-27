@@ -1,13 +1,12 @@
 # Select the last rows
 
-Keeps the last `n` (or `prop` fraction of) rows of a GPU table, similar
-to
-[`dplyr::slice_tail()`](https://dplyr.tidyverse.org/reference/slice.html).
-Ungrouped,
-[`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html)-grouped,
-and `by=` calls all run entirely on the GPU (Phase 5, task W7) – see
+Keeps the last `n` (or `prop` fraction of) rows of a GPU table, as
+[`dplyr::slice_tail()`](https://dplyr.tidyverse.org/reference/slice.html)
+does. It runs on the GPU, ungrouped, after
+[`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html) and
+with `by`; see
 [`slice_head.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/slice_head.tbl_gpu.md)
-for the shared dispatch/grouping semantics.
+for the order of the groups in the result.
 
 ## Usage
 
@@ -41,12 +40,12 @@ slice_tail(.data, ..., n, prop, by = NULL)
 
 - by:
 
-  Optional on-the-fly grouping columns, GPU-native (Phase 5, task W7):
-  result rows are ordered by each group's FIRST-APPEARANCE position in
-  `.data` (see module docs), and the result is always ungrouped.
-  Supplying `by` when `.data` is already grouped (via
+  Optional grouping columns for this call only, run on the GPU. As in
+  dplyr, the result has the groups in the order each one first appears
+  in `.data`, and it is ungrouped. Supplying `by` when `.data` is
+  already grouped (via
   [`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html))
-  is an error, matching dplyr.
+  is an error, as in dplyr.
 
 ## Value
 

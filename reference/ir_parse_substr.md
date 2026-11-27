@@ -1,4 +1,4 @@
-# Parse `substr(x, start, stop)` (Phase 11 L5)
+# Parse `substr(x, start, stop)`
 
 `start`/`stop` must be constant (non-column) whole numbers – resolved
 via

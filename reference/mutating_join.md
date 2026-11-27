@@ -27,7 +27,7 @@ mutating_join(
 ## Details
 
 Order of checks: the unsupported-`by` CPU fallback; argument validation;
-key-type resolution (raises `dplyr_error_join_incompatible_type`, A3);
-the factor-level-conflict and suffix-collision fallbacks; then, for
+key-type resolution (raises `dplyr_error_join_incompatible_type`); the
+factor-level-conflict and suffix-collision fallbacks; then, for
 `by = character()` only, dplyr's deprecation warning (emitted last so a
 fallback, whose dplyr call warns by itself, never warns twice).

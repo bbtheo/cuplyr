@@ -1,17 +1,15 @@
-# `semi_join()`/`anti_join()`: native via `cudf::filtered_join`
+# Filtering joins for `tbl_gpu` (`semi_join()`, `anti_join()`)
 
-Native GPU implementation via `cudf::filtered_join` (Phase 7 J2). Unlike
-the mutating joins, dplyr's own
-[`semi_join()`](https://dplyr.tidyverse.org/reference/filter-joins.html)/[`anti_join()`](https://dplyr.tidyverse.org/reference/filter-joins.html)
-signature has no `suffix`/`keep`/`multiple`/`unmatched`/`relationship`
-arguments at all (verified via `args(dplyr:::semi_join.data.frame)`:
-`x, y, by, copy, ..., na_matches`) – there's nothing to merge, so no
-column-collision handling is needed. The result is x's own schema
-verbatim (a row subset of x), and x's
+[`semi_join()`](https://dplyr.tidyverse.org/reference/filter-joins.html)
+keeps the rows of `x` that have a match in `y`, and
+[`anti_join()`](https://dplyr.tidyverse.org/reference/filter-joins.html)
+the rows that have none, as in dplyr. Both run on the GPU. As in dplyr,
+they take no `suffix`/`keep`/`multiple`/`unmatched`/ `relationship`
+arguments: nothing from `y` is added, so the result has `x`'s columns
+and a subset of its rows (each kept row once, duplicates of `x`
+included), and keeps `x`'s
 [`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html)
-grouping is preserved (as for every join type, see
-[`push_join()`](https://bbtheo.github.io/cuplyr/reference/push_join.md),
-`R/execute.R`).
+grouping.
 
 ## Usage
 
@@ -66,8 +64,9 @@ kept, including the ones the join empties, like dplyr.
 [`dplyr::join_by()`](https://dplyr.tidyverse.org/reference/join_by.html)
 spec, including non-equi conditions (`>=`, `>`, `<=`, `<`,
 [`between()`](https://dplyr.tidyverse.org/reference/between.html)/[`within()`](https://rdrr.io/r/base/with.html)/
-`overlaps()`) via `cudf::conditional_join`/`mixed_join` (Phase 7 J7). A
-single `closest()` condition is native (it asks whether an x row has a
-closest match), as are non-equi conditions over two `STRING` columns;
-shapes outside that fall back to CPU evaluation transparently (with a
-`cuplyr.fallback` notification), same as the mutating joins.
+`overlaps()`). A single `closest()` condition runs on the GPU (it asks
+whether an x row has a closest match), as do non-equi conditions over
+two string columns; other shapes run in dplyr on the CPU, as for the
+mutating joins (set `options(cuplyr.fallback = "warn")` to be told when;
+see
+[cuplyr-fallback](https://bbtheo.github.io/cuplyr/reference/cuplyr-fallback.md)).

@@ -1,4 +1,4 @@
-# Parse `sub(pattern, replacement, x, ignore.case=, perl=, fixed=, useBytes=)` / `gsub(...)` (Phase 11 L5)
+# Parse `sub(pattern, replacement, x, ignore.case=, perl=, fixed=, useBytes=)` / `gsub(...)`
 
 Same restrictions as
 [`ir_parse_grepl()`](https://bbtheo.github.io/cuplyr/reference/ir_parse_grepl.md):

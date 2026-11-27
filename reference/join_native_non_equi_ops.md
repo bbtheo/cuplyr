@@ -1,4 +1,4 @@
-# The non-equi operators J7's native `mixed_join`/`conditional_join` lowering understands
+# The non-equi operators the native `mixed_join`/`conditional_join` lowering understands
 
 [`join_by()`](https://dplyr.tidyverse.org/reference/join_by.html)'s own
 infix parser only ever produces one of these five for a condition

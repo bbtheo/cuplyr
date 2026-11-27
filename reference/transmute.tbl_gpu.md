@@ -2,13 +2,13 @@
 
 Computes new columns (or replaces existing ones) from expressions, like
 [`mutate.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/mutate.tbl_gpu.md),
-but keeps ONLY the columns named/created by `...` (plus group columns),
-similar to
-[`dplyr::transmute()`](https://dplyr.tidyverse.org/reference/transmute.html).
-[`transmute()`](https://dplyr.tidyverse.org/reference/transmute.html) is
-superseded in dplyr (in favor of `mutate(.keep = "none")`) but still
-fully supported, and its column-ordering rule is subtly different from
-`mutate(.keep = "none")`'s – see "Details" below.
+but keeps only the columns named or created by `...` (plus grouping
+columns), as
+[`dplyr::transmute()`](https://dplyr.tidyverse.org/reference/transmute.html)
+does. dplyr supersedes
+[`transmute()`](https://dplyr.tidyverse.org/reference/transmute.html) in
+favor of `mutate(.keep = "none")`; it still works here, and its column
+order differs from `mutate(.keep = "none")`'s (see "Details" below).
 
 ## Usage
 
@@ -37,19 +37,18 @@ group columns not otherwise mentioned.
 
 ## Details
 
-Verified empirically against dplyr 1.2.1: unlike
-[`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html) (whose
-output order keeps existing columns in their original relative position
-and appends new ones at the end, see
-[`mutate.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/mutate.tbl_gpu.md)'s
-docs),
+As in dplyr, and unlike
+[`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html) (which
+keeps existing columns where they are and appends new ones at the end,
+see
+[`mutate.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/mutate.tbl_gpu.md)),
 [`transmute()`](https://dplyr.tidyverse.org/reference/transmute.html)'s
-output order is simply the literal `...` dot order – whether a dot is a
-bare existing column or a brand-new expression. Group columns NOT
-explicitly mentioned in `...` are prepended at the very front (in
+output order is the order of the dots, whether a dot is a bare existing
+column or a new expression. Grouping columns not mentioned in `...` come
+first (in
 [`group_vars()`](https://dplyr.tidyverse.org/reference/group_data.html)
-order); a group column that IS explicitly mentioned in `...` takes its
-dot position instead of being prepended.
+order); a grouping column that is mentioned in `...` takes its dot's
+position instead.
 
 ## Examples
 

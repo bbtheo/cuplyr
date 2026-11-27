@@ -2,11 +2,11 @@
 
 One record per window-function call extracted by
 [`ir_extract_windows()`](https://bbtheo.github.io/cuplyr/reference/ir_extract_windows.md).
-This is the exact shape section 2 of
-`scratchpad/phase5_window_design.md` documents for
+This is the exact shape
 [`ast_window()`](https://bbtheo.github.io/cuplyr/reference/ast_window.md)'s
-specs (W2), produced here so W2 can consume a finished plan's specs
-directly with no reshaping.
+specs take, produced here so
+[`ast_window()`](https://bbtheo.github.io/cuplyr/reference/ast_window.md)
+can consume a finished plan's specs directly with no reshaping.
 
 ## Usage
 
@@ -52,7 +52,7 @@ window_spec(
   itself (ranking a column inherently orders by that same column),
   UNLESS an explicit
   `order_by=`/[`order_by()`](https://dplyr.tidyverse.org/reference/order_by.html)/[`with_order()`](https://dplyr.tidyverse.org/reference/with_order.html)
-  override (Phase 5 W4, `R/ir.R`'s
+  override (`R/ir.R`'s
   [`ir_parse_with_order()`](https://bbtheo.github.io/cuplyr/reference/ir_parse_with_order.md))
   is present, in which case that wins for ANY window kind
   (shift/rank/agg)
@@ -77,12 +77,13 @@ window_spec(
 
 - na_rm:
 
-  Logical scalar, `FALSE` unless a future wave adds an `na_rm=`-aware
-  window op
+  Logical scalar, the call's `na.rm =` argument (`roll_*()`, and
+  [`mean()`](https://rdrr.io/r/base/mean.html)/[`median()`](https://rdrr.io/r/stats/median.html)
+  of a date); `FALSE` unless the call sets it
 
 - input_type:
 
-  (F80) GPU type string of an integer
+  GPU type string of an integer
   [`sum()`](https://rdrr.io/r/base/sum.html)'s argument (`"INT32"` or
   `"BOOL8"`), `NA_character_` for every other call; a lazy
   [`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html) runs a

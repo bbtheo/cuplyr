@@ -1,4 +1,4 @@
-# Parse a `case_when()` call into IR (Phase 4)
+# Parse a `case_when()` call into IR
 
 `case_when(cond1 ~ val1, cond2 ~ val2, ..., .default = val)` dots are
 two-sided formulas (`~` calls), not ordinary expressions – so unlike
@@ -8,9 +8,9 @@ every other `ir_call_registry` entry, this is invoked directly from
 the registry's generic per-arg parse loop. Recognizes exactly: any
 number of two-sided `cond ~ value` clauses, plus an optional
 `.default = value` named argument. Returns `NULL` (unsupported, caller
-falls back per the normal contract) for anything else this Phase-4 wave
-doesn't implement yet: `.ptype=`, `.size=`, `.unmatched=`, one-sided
-formulas, non-formula dots, or zero clauses.
+falls back per the normal contract) for anything else, which isn't
+supported: `.ptype=`, `.size=`, `.unmatched=`, one-sided formulas,
+non-formula dots, or zero clauses.
 
 ## Usage
 

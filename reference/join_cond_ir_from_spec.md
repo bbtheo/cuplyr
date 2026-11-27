@@ -1,4 +1,4 @@
-# Build a single, `&`-folded IR condition tree from a join spec's non-equi subset (Phase 7 J7)
+# Build a single, `&`-folded IR condition tree from a join spec's non-equi subset
 
 One `ir_call(op, list(x_col, y_col))` comparison node per condition
 entry (`cond_spec$left[i] <op> cond_spec$right[i]`), each column tagged

@@ -1,12 +1,12 @@
 # Restrict factor level metadata to columns that survive an op
 
-Implements the factor_levels half of D3: `schema$factor_levels` is
-always recomputed from the *input* schema's factor_levels, filtered to
-the names present in the node's output schema. This fixes the bug where
-eager [`select()`](https://dplyr.tidyverse.org/reference/select.html) of
-a factor column dropped `factor_levels`, causing
-[`collect()`](https://dplyr.tidyverse.org/reference/compute.html) to
-return integer codes instead of a factor.
+`schema$factor_levels` is always recomputed from the *input* schema's
+factor_levels, filtered to the names present in the node's output
+schema. So an eager
+[`select()`](https://dplyr.tidyverse.org/reference/select.html) of a
+factor column keeps its `factor_levels`, and
+[`collect()`](https://dplyr.tidyverse.org/reference/compute.html)
+returns a factor rather than integer codes.
 
 ## Usage
 

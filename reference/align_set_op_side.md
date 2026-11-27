@@ -16,7 +16,7 @@ the target – the common case (x/y already schema-identical) skips both
 entirely, preserving whatever laziness `tbl` already had. Names/types
 alone don't catch every case that needs a real align pass: two
 `DICTIONARY32` columns can share the type string while their level
-VECTORS differ (Bug 2's native remap path), so
+vectors differ (the level-union remap path), so
 [`factor_levels_match_target()`](https://bbtheo.github.io/cuplyr/reference/factor_levels_match_target.md)
 (R/bind.R) is checked too.
 [`align_to_schema()`](https://bbtheo.github.io/cuplyr/reference/align_to_schema.md)'s

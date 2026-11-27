@@ -1,4 +1,4 @@
-# Parse `nchar(x, type = "chars", allowNA = FALSE, keepNA = NA)` (Phase 11 L5)
+# Parse `nchar(x, type = "chars", allowNA = FALSE, keepNA = NA)`
 
 Only the default `type = "chars"` shape is implemented – `allowNA=`/
 `keepNA=` present at all, or an explicit `type=` other than `"chars"`,

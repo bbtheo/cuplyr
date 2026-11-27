@@ -1,4 +1,4 @@
-# Raise dplyr's own `bind_rows()` incompatible-type error (Phase 11 L4)
+# Raise dplyr's own `bind_rows()` incompatible-type error
 
 Reproduces `vctrs`' exact message shape, verified empirically against
 dplyr 1.2.1/vctrs 0.7.3 across 2-, 3-, and 4-table

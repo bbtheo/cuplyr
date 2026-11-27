@@ -15,7 +15,7 @@ align = &quot;right&quot; default exactly (see Details)."><meta property="og:ima
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -98,24 +98,25 @@ produces <code>NA</code> for that position ("NA poisoning").
 <code>na.rm = TRUE</code>: a window is only ever <code>NA</code> because it doesn't yet have
 <code>n</code> physical elements available (the leading <code>n - 1</code> positions,
 always). Once a window has <code>n</code> elements, <code>NA</code>s within it are dropped
-before computing (an all-<code>NA</code> window still yields <code>NA</code>). This
-<code>na.rm = TRUE</code> behavior was verified empirically against
-<code>data.table::frollmean(x, n, na.rm = TRUE)</code> (not assumed): the leading
-incomplete positions stay <code>NA</code> even though na.rm is set.</p>
+before computing (an all-<code>NA</code> window still yields <code>NA</code>). This is what
+<code>data.table::frollmean(x, n, na.rm = TRUE)</code> does: the leading
+incomplete positions stay <code>NA</code> even with <code>na.rm = TRUE</code>.</p>
 <p>Inside <code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code>/<code><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter()</a></code> on a <code>tbl_gpu</code>, <code>roll_mean()</code>/<code>roll_sum()</code>/
 <code>roll_min()</code>/<code>roll_max()</code>/<code>roll_sd()</code> (not <code>roll_median()</code>, see below)
-run GPU-natively, in time that does not depend on the window width
-(segmented scans; cudf's own rolling kernel is kept for
-narrow windows, where it is faster, and for min/max of timestamps and
-logicals) – these R implementations are the CPU semantics reference and
-the engine for standalone use. cudf 25.12 has
-no MEDIAN rolling aggregation, so <code>roll_median()</code> always runs on the CPU
-(see "Median engines").
-<code>data.table::frollmean(x, n)</code> (and its five siblings) work as
-equivalent GPU-native aliases inside <code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code>/<code><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter()</a></code> too, as long
-as <code>align</code>/<code>fill</code>/<code>adaptive</code> are left at their defaults (<code>"right"</code>,
-<code>NA</code>, <code>FALSE</code>) – any other value falls back / errors, matching this
-task's explicit "right-aligned only" scope.</p>
+run on the GPU, and per group on a grouped table; on an integer or double
+column they take time that does not depend on the window width. Called on
+an ordinary R vector, these functions run in R and give the same values.
+The result types differ in one place: <code>roll_min()</code> and <code>roll_max()</code> of an
+integer, logical, <code>Date</code> or <code>POSIXct</code> column keep that type on the GPU,
+while the R functions return a double, and so do dplyr on a data frame and
+a <code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code> on a <code>tbl_gpu</code> that runs on the CPU. The GPU library has no
+rolling median, so a <code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code> or <code><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter()</a></code> with <code>roll_median()</code> runs in
+dplyr on the CPU (see "Median engines").
+<code>data.table::frollmean(x, n)</code> (and its siblings <code>frollsum()</code>,
+<code>frollmin()</code>, <code>frollmax()</code> and <code>frollsd()</code>) run on the GPU inside
+<code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code>/<code><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter()</a></code> too, as long as <code>align</code>, <code>fill</code>, <code>adaptive</code>,
+<code>partial</code> and <code>give.names</code> keep their defaults (<code>"right"</code>, <code>NA</code>, <code>FALSE</code>,
+<code>FALSE</code>, <code>FALSE</code>); any other value runs in dplyr on the CPU.</p>
 <p><strong>Median engines.</strong> By default <code>roll_median()</code> uses a built-in exact
 engine that returns exactly <code><a href="https://rdrr.io/r/stats/median.html" class="external-link">stats::median()</a></code> of each window converted to
 double (so integer and logical input give double, as <code><a href="https://rdrr.io/r/stats/median.html" class="external-link">median()</a></code> of the
@@ -138,10 +139,13 @@ old, the exact engine is used and a message says so once per session. Any
 other value of the option warns once (class <code>cuplyr_warning_invalid_option</code>)
 and the exact engine is used; see <a href="cuplyr-options.html">cuplyr-options</a>. <code><a href="https://rdrr.io/pkg/data.table/man/froll.html" class="external-link">data.table::frollmedian()</a></code> written
 inside <code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code> keeps data.table's own result.</p>
-<p>The internal option <code>cuplyr.roll_path</code> (else the environment variable
-<code>CUPLYR_ROLL_PATH</code>), one of <code>"auto"</code> (the default), <code>"scans"</code> or <code>"cudf"</code>,
-forces one of the two GPU paths. It exists for tests and benchmarks and
-changes speed, not results.</p>
+<p>The GPU computes these windows in one of two ways: with scans, whose time
+does not depend on the window width, or with a direct rolling kernel,
+which is faster on narrow windows (and also used for <code>roll_min()</code> and
+<code>roll_max()</code> of dates, date-times and logicals). The internal option
+<code>cuplyr.roll_path</code> (else the environment variable <code>CUPLYR_ROLL_PATH</code>), one
+of <code>"auto"</code> (the default), <code>"scans"</code> or <code>"cudf"</code>, forces one of them. It
+exists for tests and benchmarks and changes speed, not results.</p>
     </div>
 
   </main><aside class="col-md-3"><nav id="toc" aria-label="Table of contents"><h2>On this page</h2>

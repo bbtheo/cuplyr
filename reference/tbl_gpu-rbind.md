@@ -34,4 +34,6 @@ cbind(..., deparse.level = 1)
 
 ## Value
 
-A `tbl_gpu`.
+A `tbl_gpu`; a data frame when an input has a list or data frame column
+(see
+[`bind_rows()`](https://bbtheo.github.io/cuplyr/reference/bind_rows.md)).

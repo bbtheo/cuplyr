@@ -2,7 +2,7 @@
 
 See
 [`ir_parse_value_match_clauses()`](https://bbtheo.github.io/cuplyr/reference/ir_parse_value_match_clauses.md).
-`from=`/`to=`/`unmatched=`/`ptype=` are not implemented this wave.
+`from=`/`to=`/`unmatched=`/`ptype=` are not supported.
 
 ## Usage
 

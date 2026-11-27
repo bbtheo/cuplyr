@@ -1,14 +1,14 @@
-# Does an IR subtree hold an F42 checked integer node?
+# Does an IR subtree hold a checked integer node?
 
 A checked node is a binary `+`, `-` or `*` whose operands are all
 INT32/BOOL8 (a bare untyped NA literal adopts its sibling's type): the
 rule of `checked_int_kind()` kind 1 in `src/expr_eval.hpp`. Such a node
 can warn "NAs produced by integer overflow", and dplyr's warning depends
-on the rows its verb receives, so the optimizer must not change them
-(F70). `%/%` and `%%` never warn and are not checked, nor is a node with
-a null literal operand (`a + NA`; its other operand is still walked).
-Asked through `record_checked_int()`, once per record and only by the
-optimizer (F110).
+on the rows its verb receives, so the optimizer must not change them.
+`%/%` and `%%` never warn and are not checked, nor is a node with a null
+literal operand (`a + NA`; its other operand is still walked). Asked
+through `record_checked_int()`, once per record and only by the
+optimizer.
 
 ## Usage
 

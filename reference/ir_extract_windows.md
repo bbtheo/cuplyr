@@ -1,11 +1,10 @@
 # Extract innermost window calls from an IR tree (one decomposition pass)
 
-Implements section 1.2's decomposition algorithm: a single bottom-up
-walk that replaces every window-class call node whose OWN arguments
-contain no (nested) window call anywhere – i.e. every *innermost* window
-call – with an
+The decomposition algorithm: a single bottom-up walk that replaces every
+window-class call node whose OWN arguments contain no (nested) window
+call anywhere – i.e. every *innermost* window call – with an
 [`ir_col()`](https://bbtheo.github.io/cuplyr/reference/ir_col.md)
-reference to a freshly materialized (or, on a cache hit, previously
+reference to a freshly materialized (or, on a cache hit, already
 materialized) temp column, leaving any window call that is NOT yet
 innermost (its arguments still contain a deeper window call) untouched
 under its own op name for a later pass (see

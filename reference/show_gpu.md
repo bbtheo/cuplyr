@@ -42,7 +42,7 @@ show_gpu()
 #> Device:       NVIDIA GeForce RTX 5070 
 #> Compute:      12.0 
 #> Memory:       12.4 GB total
-#>               11.6 GB free
-#>               0.8 GB used
-#> SMs:          1 
+#>               11.4 GB free
+#>               1 GB used
+#> SMs:          48 
 ```

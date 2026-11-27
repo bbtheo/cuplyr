@@ -40,8 +40,10 @@ select(.data, ...)
     (`sort(names(x))`, [`paste0()`](https://rdrr.io/r/base/paste.html),
     [`rev()`](https://rdrr.io/r/base/rev.html),
     [`setdiff()`](https://generics.r-lib.org/reference/setops.html),
-    `.data$x`, ... with safe arguments), is resolved on the data: a
-    notified CPU fallback that collects the table
+    `.data$x`, ... with safe arguments), is resolved on the data: the
+    table is collected and the selection runs in dplyr on the CPU (see
+    [cuplyr-fallback](https://bbtheo.github.io/cuplyr/reference/cuplyr-fallback.md)
+    to be told when)
 
   - Helpers:
     [`starts_with()`](https://tidyselect.r-lib.org/reference/starts_with.html),
@@ -64,13 +66,11 @@ The original data remains in GPU memory until garbage collected.
 
 ### Renaming
 
-`select(new_name = old_name)` both selects and renames `old_name`. This
-is schema-only (see
-[`rename.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/rename.tbl_gpu.md)):
-the underlying selection still runs as one `gpu_select()` gather, with
-the rename applied on top of it as a separate, schema-only
-[`ast_rename()`](https://bbtheo.github.io/cuplyr/reference/ast_rename.md)
-step whenever the tidyselect resolution renamed a column.
+`select(new_name = old_name)` both selects and renames `old_name`. The
+selection runs on the GPU as usual; the rename only changes the column
+names, as
+[`rename.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/rename.tbl_gpu.md)
+does.
 
 ### Grouped tables
 

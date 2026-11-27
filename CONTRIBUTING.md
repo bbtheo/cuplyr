@@ -9,7 +9,8 @@ all welcome.
 
 1.  Every bug and feature starts as a [GitHub
     issue](https://github.com/bbtheo/cuplyr/issues). The issue is where
-    the approach gets discussed and agreed.
+    the approach gets discussed and agreed. Issues are ordered on the
+    [roadmap board](#the-roadmap-board).
 2.  Every change lands through a pull request that links its issue with
     `Fixes #123`. The maintainer and coding agents work this way too.
 3.  A maintainer runs [the merge gate](#the-merge-gate) on the pull
@@ -19,6 +20,34 @@ all welcome.
 
 Typos and small documentation fixes can skip the issue. Open the pull
 request directly.
+
+## The roadmap board
+
+The [roadmap board](https://github.com/users/bbtheo/projects/1) shows
+every open issue in priority order: the top of the list is worked on
+first. Each issue has a status:
+
+| Status | Meaning |
+|----|----|
+| Proposed | A report or an idea. Discussion is welcome; nothing is agreed yet. |
+| Approved | Agreed and ready to pick up, with the approach in the issue. |
+| In progress | Someone is working on it. Its pull request, if there is one yet, is a draft. |
+| In review | The pull request is ready for review. |
+| Done | Merged. |
+| Not planned | Decided against; the issue says why. |
+
+New issues start as Proposed. A maintainer moves an issue to Approved
+once the problem and the approach are clear, and sets the order.
+
+The `tbd` label marks an open question: a design choice, a trade-off, or
+whether a difference from dplyr is worth fixing. The question is in the
+issue’s comments. If you have a view or a use case, say so there; that
+is one of the most useful things an outside contributor can do.
+
+To pick up an issue, choose one that is Approved, ideally labelled
+`good first issue ❤️` or `help wanted ❤️`, and comment that you are
+taking it. A maintainer moves it to In progress so nobody else starts
+the same work.
 
 ## Scope
 
@@ -31,15 +60,20 @@ In scope:
 - Reading and writing data on the GPU, memory management, and the lazy
   optimizer.
 - Installation and packaging.
+- Column classes beyond the basic types (`ts`, `difftime`, `hms`,
+  `IDate`, `POSIXlt` and others). Today an upload raises
+  `cuplyr_error_unsupported_class`; the aim is that they work, natively
+  where a GPU type fits and through the CPU route otherwise.
 
 Out of scope for now:
 
 - General lubridate parity. lubridate functions run through the CPU
   fallback, apart from fixed-unit `floor_date()`, `ceiling_date()` and
   `round_date()`.
-- Custom and S4 column classes (`ts`, `difftime`, `hms`, `IDate` and
-  others). Upload raises `cuplyr_error_unsupported_class`.
 - Multi-GPU execution.
+- A GPU version of `do()`. `do()` works on a GPU table through the CPU
+  fallback and stays there: it is superseded in dplyr, and it runs
+  arbitrary R code on each group’s data frame.
 
 Something outside this list can still come in. Open an issue and make
 the case. Changing the scope means a pull request against this section.
@@ -74,7 +108,8 @@ Open an issue and show the code you want to work. Wait until a
 maintainer agrees on the approach before you write a large pull request.
 
 Issues labelled `help wanted ❤️` are agreed and open to anyone. Comment
-on the issue before you start so two people don’t do the same work.
+on the issue before you start so two people don’t do the same work (see
+[the roadmap board](#the-roadmap-board)).
 
 ## Pull requests
 
@@ -83,6 +118,9 @@ on the issue before you start so two people don’t do the same work.
 - Keep one topic per pull request. A feature plus an unrelated refactor
   is two pull requests.
 - Put `Fixes #123` in the description.
+- Open the pull request as a draft early if you like, so others can see
+  the approach and comment before it is finished. Mark it ready for
+  review when it is done; the merge gate doesn’t run on drafts.
 - Add a bullet to `NEWS.md` under “development version” for anything a
   user can see. Start with the function name and write what the user can
   now do.
@@ -116,9 +154,15 @@ maintainer runs the tests for you. This takes longer.
 
 ## Developer setup
 
-You need Linux, an NVIDIA GPU (Volta or newer), CUDA 12.2 or newer, and
+You need Linux, an NVIDIA GPU with compute capability 7.5 (Turing) or
+newer, a system CUDA toolkit (`./configure` accepts 12.2 or newer, but
+RAPIDS 26.x is tested with CUDA 13, which pixi and the installers use;
+it finds the toolkit through `CUDA_HOME` or `/usr/local/cuda`), and
 [pixi](https://pixi.sh). pixi installs R, RAPIDS libcudf and every R
-package into the project directory.
+package into the project directory. The default pixi environment is
+RAPIDS 26.10, the series cuplyr is developed, tested and gated on. It
+carries no CUDA compiler: `nvcc` and the CUDA headers come from the
+system toolkit.
 
 ``` bash
 curl -fsSL https://pixi.sh/install.sh | bash   # once
@@ -138,6 +182,31 @@ Daily commands:
 | Regenerate `NAMESPACE`, `man/` and the Rcpp exports | `pixi run document` |
 | Start R with the package environment | `pixi run r`, then [`pkgload::load_all()`](https://pkgload.r-lib.org/reference/load_all.html) |
 | Build the pkgdown site into `docs/` | `pixi run pkgdown` |
+
+### Checking against RAPIDS 26.02
+
+cuplyr supports RAPIDS 26.02 and later, with 26.02 as the minimum. A
+second pixi environment, `rapids2602`, pins that series. Run any task in
+it by name:
+
+``` bash
+pixi run -e rapids2602 test-file tests/testthat/test-filter.R
+pixi run -e rapids2602 conformance
+```
+
+or select it for one command with
+`CUPLYR_PIXI_ENV=rapids2602 tools/conformance`. The `tools/` scripts
+pick their environment (`CUPLYR_PIXI_MANIFEST` and `CUPLYR_PIXI_ENV`)
+from the first of these that sets it: the `CUPLYR_PIXI_*` variable
+itself; the environment `pixi run -e <env>` or `pixi shell -e <env>`
+activated; a worktree’s untracked `.cuplyr-env` file (`KEY=VALUE`
+lines); the main checkout’s `pixi.toml` and its default environment. So
+`pixi run -e rapids2602 ...` wins over a `.cuplyr-env` that pins another
+series. The tools rebuild the C++ when the active RAPIDS changes (they
+record what `src/` was built against in `src/.cuplyr-build-env`), so you
+can switch back and forth in one checkout. The release check runs the
+dplyr conformance suite on 26.02 as well as 26.10; see the release
+checklist.
 
 The test commands load the package from the source tree with
 [`pkgload::load_all()`](https://pkgload.r-lib.org/reference/load_all.html),
@@ -172,14 +241,12 @@ change. A source install from a clone uses them as they are.
 - A bug fix starts with a test that fails. If the test passes before the
   fix, the bug isn’t understood yet.
 
-``` r
-
-test_that("filter() keeps rows where the condition is TRUE", {
-  skip_if_no_gpu()
-  df <- data.frame(x = c(1, NA, 3), g = c("a", "b", "a"))
-  expect_same_as_dplyr(df, function(d) dplyr::filter(d, x > 1))
-})
-```
+\
+`test_that``(``"filter() keeps rows where the condition is TRUE"``, ``{`\
+`  ``skip_if_no_gpu``(``)`\
+`  ``df`` ``<-`` `[`data.frame`](https://rdrr.io/r/base/data.frame.html)`(``x ``=`` `[`c`](https://rdrr.io/r/base/c.html)`(``1``, ``NA``, ``3``)``, g ``=`` `[`c`](https://rdrr.io/r/base/c.html)`(``"a"``, ``"b"``, ``"a"``)``)`\
+`  ``expect_same_as_dplyr``(``df``, ``function``(``d``)`` ``dplyr``::`[`filter`](https://dplyr.tidyverse.org/reference/filter.html)`(``d``, ``x`` ``>`` ``1``)``)`\
+`}``)`
 
 ### Style
 
@@ -217,7 +284,9 @@ The default branch always carries a development version ending in
 - returns the version to `.9000`
 
 Release notes name the RAPIDS version the release was built and tested
-against.
+against. Before a release, run the dplyr conformance suite on the
+minimum supported RAPIDS too (`pixi run -e rapids2602 conformance`, see
+[Checking against RAPIDS 26.02](#checking-against-rapids-2602)).
 
 ## Website
 

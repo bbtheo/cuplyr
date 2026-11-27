@@ -7,7 +7,7 @@
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -46,7 +46,7 @@
 
     <div class="section level2">
     <h2 id="ref-usage">Usage<a class="anchor" aria-label="anchor" href="#ref-usage"></a></h2>
-    <div class="sourceCode"><pre class="sourceCode r"><code><span><span class="fu">ast_source</span><span class="op">(</span><span class="va">schema</span>, source_ptr <span class="op">=</span> <span class="cn">NULL</span>, scan <span class="op">=</span> <span class="cn">NULL</span><span class="op">)</span></span></code></pre></div>
+    <div class="sourceCode"><pre class="sourceCode r"><code><span><span class="fu">ast_source</span><span class="op">(</span><span class="va">schema</span>, source_ptr <span class="op">=</span> <span class="cn">NULL</span>, scan <span class="op">=</span> <span class="cn">NULL</span>, origin <span class="op">=</span> <span class="cn">NULL</span><span class="op">)</span></span></code></pre></div>
     </div>
 
     <div class="section level2">
@@ -63,6 +63,12 @@
 
 <dt id="arg-scan">scan<a class="anchor" aria-label="anchor" href="#arg-scan"></a></dt>
 <dd><p>A parquet scan record (<code><a href="read_parquet_gpu.html">read_parquet_gpu()</a></code>), or NULL</p></dd>
+
+
+<dt id="arg-origin">origin<a class="anchor" aria-label="anchor" href="#arg-origin"></a></dt>
+<dd><p>The CPU step that produced the table (<code>plan_origin()</code>,
+R/plan-text.R: plain text only), or NULL. Read only by <code><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain()</a></code> and
+<code><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">show_query()</a></code>.</p></dd>
 
 </dl></div>
     <div class="section level2">

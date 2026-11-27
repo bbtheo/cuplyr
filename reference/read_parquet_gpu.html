@@ -19,7 +19,7 @@ write_parquet_gpu() writes a GPU table with libcudf's writer."><meta property="o
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -183,6 +183,21 @@ is read: a lazy scan sees the file as it is when the plan runs, not as it was
 when the table was made. The row count <code><a href="https://rdrr.io/r/base/nrow.html" class="external-link">nrow()</a></code> of a bare scan comes from the
 footer at the time you ask. Reading one lazy table twice reads the file
 twice.</p>
+<p>A window <code><a href="https://rdrr.io/r/base/Extremes.html" class="external-link">min()</a></code> or <code><a href="https://rdrr.io/r/base/Extremes.html" class="external-link">max()</a></code> in <code><a href="https://dplyr.tidyverse.org/reference/mutate.html" class="external-link">mutate()</a></code> or <code><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter()</a></code> over a lazy table can
+also look at the files at the verb, before <code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collect()</a></code>: it may read the footers (the row count of a plan that
+keeps its rows, one footer per file, so a missing file is an error at the
+verb), or run a small query over the plan to learn whether a result or a
+<code>.drop = FALSE</code> group is empty, which decides whether an integer result is a
+double. The query reads only the columns the pending steps need to give
+their rows, and an error in one of those steps (a missing file included) is
+an error at the verb. The plan is not run early, and its warnings come when
+it runs. (An integer or logical <code><a href="https://rdrr.io/r/base/Extremes.html" class="external-link">min()</a></code>/<code><a href="https://rdrr.io/r/base/Extremes.html" class="external-link">max()</a></code> in <code><a href="https://dplyr.tidyverse.org/reference/summarise.html" class="external-link">summarise()</a></code> runs the
+plan at the verb, as for any lazy table.) If a file changes after that, the types such a plan promised can be
+stale: a file emptied after the verb stops the run with
+<code>cuplyr_error_parquet_file_emptied</code> when the type came from the footer, and
+gives the type the plan said (not dplyr's) when it came from the query, whose
+warning also names the empty groups it found. Make the table again after
+changing a file.</p>
 </div>
 
 <div class="section">
@@ -193,7 +208,9 @@ twice.</p>
 name the file: <code>cuplyr_error_parquet_not_found</code>, <code>_invalid</code> (not a parquet
 file, corrupt footer), <code>_unsupported_type</code>, <code>_schema_changed</code>,
 <code>_schema_mismatch</code> (files that differ), <code>_unknown_column</code> and <code>_columns</code>
-(<code>columns =</code> names no column or is empty), <code>_write</code> and <code>_compression</code>.
+(<code>columns =</code> names no column or is empty), <code>_file_emptied</code> (a file emptied
+after a <code><a href="https://rdrr.io/r/base/Extremes.html" class="external-link">min()</a></code>/<code><a href="https://rdrr.io/r/base/Extremes.html" class="external-link">max()</a></code> typed a plan from its footer), <code>_write</code> and
+<code>_compression</code>.
 Several files are read by one libcudf call that doesn't say which file a
 problem is in, so those messages say "one of the parquet files". Running out
 of GPU memory is <code>cuplyr_error_gpu_oom</code>, with the file in the message.</p>
@@ -222,9 +239,10 @@ comparison of a column with a literal that converts to the column's file
 type without change (<code>==</code>, <code>!=</code>, <code>&lt;</code>, <code>&lt;=</code>, <code>&gt;</code>, <code>&gt;=</code>) on an integer,
 <code>integer64</code>, <code>Date</code> or <code>POSIXct</code> column, or <code>!is.na()</code> of an <code>integer</code> or <code>integer64</code> column;
 the <code>&amp;</code>s of a condition are split. Comparisons on double and string columns
-are not pushed: libcudf 25.12 can skip a row group wrongly from a double
-column's <code>NaN</code> statistics or a string column's deprecated min/max statistics
-(signed byte order), which would lose rows. They are applied after the read, so a filter on doubles or
+are not pushed: libcudf can skip a row group wrongly from a
+double column's <code>NaN</code> statistics, and a string column's deprecated min/max
+statistics (signed byte order) are not proved safe, and either would lose rows.
+They are applied after the read, so a filter on doubles or
 strings gives the same rows but skips no row groups. A factor written by
 <code>arrow::write_parquet()</code> reads as a string (see above), so it is not pushed
 either.

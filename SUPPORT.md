@@ -16,11 +16,9 @@ the example, and say whether the table is eager or lazy.
 Most first problems are installation problems. Run these and read the
 output:
 
-``` r
-
-cuplyr::verify_installation()
-cuplyr::diagnostics()
-```
+\
+`cuplyr``::`[`verify_installation`](https://bbtheo.github.io/cuplyr/reference/verify_installation.md)`(``)`\
+`cuplyr``::`[`diagnostics`](https://bbtheo.github.io/cuplyr/reference/diagnostics.md)`(``)`
 
 Paste the output of
 [`diagnostics()`](https://bbtheo.github.io/cuplyr/reference/diagnostics.md)

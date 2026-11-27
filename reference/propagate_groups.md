@@ -3,10 +3,9 @@
 A `join` keeps `x`'s groups that survive in its output
 ([`push_join()`](https://bbtheo.github.io/cuplyr/reference/push_join.md)
 computes that itself; this branch is only the defensive default).
-`summarise` yields whatever `node$result_groups` says (Phase 6, task 3 –
-computed by `resolve_summarise_groups()`, R/summarise.R, from the node's
-`.groups=` semantics;
-[`character()`](https://rdrr.io/r/base/character.html) for
+`summarise` yields whatever `node$result_groups` says (computed by
+`resolve_summarise_groups()`, R/summarise.R, from the node's `.groups=`
+semantics; [`character()`](https://rdrr.io/r/base/character.html) for
 `.groups = "drop"`/an ungrouped input, all pre-summarise groups for
 `"keep"`, all-but-the-last for the default/ `"drop_last"`). Every other
 node type keeps whichever of the existing `groups` still appear in the

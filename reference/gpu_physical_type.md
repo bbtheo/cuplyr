@@ -1,13 +1,12 @@
 # Physical GPU storage type for a logical schema type
 
-Phase 11 L2 design decision: cuplyr keeps factor columns as plain INT32
-codes physically on the GPU rather than adopting cudf's real
-`DICTIONARY32` column type (a dictionary-encoded keys+indices
-structure). `"DICTIONARY32"` is therefore a LOGICAL type only, in
-`gpu_type_from_r()` and every schema's `$types` – confirmed by
-`df_to_gpu()`: a factor's `TYPEOF()` is `INTSXP`, so it uploads through
-the exact same `integer_to_gpu()` path as a real integer column
-(`src/transfer_io.cpp`).
+cuplyr keeps factor columns as plain INT32 codes physically on the GPU
+rather than adopting cudf's real `DICTIONARY32` column type (a
+dictionary-encoded keys+indices structure). `"DICTIONARY32"` is
+therefore a LOGICAL type only, in `gpu_type_from_r()` and every schema's
+`$types` – confirmed by `df_to_gpu()`: a factor's `TYPEOF()` is
+`INTSXP`, so it uploads through the exact same `integer_to_gpu()` path
+as a real integer column (`src/transfer_io.cpp`).
 
 ## Usage
 

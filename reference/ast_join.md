@@ -53,18 +53,18 @@ ast_join(
 
 - multiple:
 
-  Character, one of "all"/"any"/"first"/"last" (dormant – only "all" is
-  honored until Phase 7 J5)
+  Character, one of "all"/"any"/"first"/"last"
 
 - unmatched:
 
-  Character, one or two of "drop"/"error" (dormant – only "drop" is
-  honored until Phase 7 J5)
+  Character, one or two of "drop"/"error"
 
 - relationship:
 
-  `NULL` or one of the four cardinality strings (dormant – not enforced
-  until Phase 7 J5)
+  `NULL` or one of the four cardinality strings (`multiple`, `unmatched`
+  and `relationship` are applied/checked at execution, see
+  [`check_join_cardinality()`](https://bbtheo.github.io/cuplyr/reference/check_join_cardinality.md)
+  in `R/join.R`)
 
 - cross_by:
 

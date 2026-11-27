@@ -5,14 +5,14 @@ exact sample.int() calls dplyr makes, so the same set.seed() gives the
 same rows, and gather them on the GPU like slice_sample.tbl_gpu(). A
 weight, a size that reads the data (a column, n()) or draws random
 numbers, and any call dplyr would raise an error for (e.g. a size larger
-than a group without replace) run on the CPU through gpu_fallback(),
+than a group without replace) run in dplyr on the CPU (see cuplyr-fallback),
 where dplyr raises the error and consumes the RNG itself."><meta property="og:description" content="sample_n() and sample_frac() (superseded by slice_sample() in dplyr)
 on a GPU table. Without weight they draw row indices on the CPU with the
 exact sample.int() calls dplyr makes, so the same set.seed() gives the
 same rows, and gather them on the GPU like slice_sample.tbl_gpu(). A
 weight, a size that reads the data (a column, n()) or draws random
 numbers, and any call dplyr would raise an error for (e.g. a size larger
-than a group without replace) run on the CPU through gpu_fallback(),
+than a group without replace) run in dplyr on the CPU (see cuplyr-fallback),
 where dplyr raises the error and consumes the RNG itself."><meta property="og:image" content="https://bbtheo.github.io/cuplyr/logo.png"></head><body>
     <a href="#main" class="visually-hidden-focusable">Skip to contents</a>
 
@@ -21,7 +21,7 @@ where dplyr raises the error and consumes the RNG itself."><meta property="og:im
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -61,7 +61,7 @@ exact <code><a href="https://rdrr.io/r/base/sample.html" class="external-link">s
 same rows, and gather them on the GPU like <code><a href="slice_sample.tbl_gpu.html">slice_sample.tbl_gpu()</a></code>. A
 <code>weight</code>, a <code>size</code> that reads the data (a column, <code><a href="https://dplyr.tidyverse.org/reference/context.html" class="external-link">n()</a></code>) or draws random
 numbers, and any call dplyr would raise an error for (e.g. a <code>size</code> larger
-than a group without <code>replace</code>) run on the CPU through <code><a href="gpu_fallback.html">gpu_fallback()</a></code>,
+than a group without <code>replace</code>) run in dplyr on the CPU (see <a href="cuplyr-fallback.html">cuplyr-fallback</a>),
 where dplyr raises the error and consumes the RNG itself.</p>
     </div>
 

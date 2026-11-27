@@ -23,8 +23,8 @@ ir_call(op, args, meta = list())
 
 - meta:
 
-  Forward-compatibility slot for future lowering metadata (e.g.
-  window-function args); unused in Phase 1
+  Slot for lowering metadata (e.g. a window call's `order_by=` override,
+  or a `case_when` node's `n_when`)
 
 ## Value
 

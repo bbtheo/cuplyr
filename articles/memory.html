@@ -24,7 +24,7 @@
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -251,7 +251,7 @@ resource holds.</p>
 <span><span class="co">#&gt; [1] "async"</span></span>
 <span><span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span>free <span class="op">=</span> <span class="va">st</span><span class="op">$</span><span class="va">free_bytes</span>, pool <span class="op">=</span> <span class="va">st</span><span class="op">$</span><span class="va">pool_bytes</span>, in_use <span class="op">=</span> <span class="va">st</span><span class="op">$</span><span class="va">pool_used_bytes</span><span class="op">)</span></span>
 <span><span class="co">#&gt;        free        pool      in_use </span></span>
-<span><span class="co">#&gt; 11604656128    33554432     1138378</span></span></code></pre></div>
+<span><span class="co">#&gt; 11469848576    33554432     1135562</span></span></code></pre></div>
 <ul>
 <li>
 <code>free_bytes</code>, <code>used_bytes</code> and
@@ -280,7 +280,7 @@ see how much of the card you take from others, read
 <span><span class="fu"><a href="../reference/gpu_memory_usage.html">gpu_memory_usage</a></span><span class="op">(</span><span class="va">gpu_df</span><span class="op">)</span>  <span class="co"># estimate from dimensions and types</span></span>
 <span><span class="co">#&gt; [1] 8125000</span></span>
 <span><span class="fu"><a href="../reference/gpu_memory_state.html">gpu_memory_state</a></span><span class="op">(</span><span class="op">)</span><span class="op">$</span><span class="va">pool_used_bytes</span></span>
-<span><span class="co">#&gt; [1] 9138378</span></span></code></pre></div>
+<span><span class="co">#&gt; [1] 9135562</span></span></code></pre></div>
 <p><code><a href="../reference/gpu_memory_usage.html">gpu_memory_usage()</a></code> estimates a table’s size from its row
 count and column types without touching the device. Tables that share
 columns, such as a <code><a href="https://dplyr.tidyverse.org/reference/select.html" class="external-link">select()</a></code> of another table, overlap in
@@ -317,7 +317,7 @@ retries the step once. A second failure raises an error of class
 <span><span class="va">res</span> <span class="op">&lt;-</span> <span class="fu"><a href="../reference/gpu_gc.html">gpu_gc</a></span><span class="op">(</span><span class="op">)</span></span>
 <span><span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span>freed <span class="op">=</span> <span class="va">res</span><span class="op">$</span><span class="va">freed_bytes</span>, released <span class="op">=</span> <span class="va">res</span><span class="op">$</span><span class="va">released_bytes</span><span class="op">)</span></span>
 <span><span class="co">#&gt;    freed released </span></span>
-<span><span class="co">#&gt;  8002816        0</span></span></code></pre></div>
+<span><span class="co">#&gt;    8e+06    0e+00</span></span></code></pre></div>
 </div>
 <div class="section level2">
 <h2 id="how-to-choose">How to choose<a class="anchor" aria-label="anchor" href="#how-to-choose"></a>

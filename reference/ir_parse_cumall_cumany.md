@@ -3,9 +3,7 @@
 Verified against dplyr 1.2.1: `cumall(c(T,T,NA,T,F,T))` is
 `T,T,NA,NA, F,F`; `cumany(c(F,NA,T,F))` is `F,NA,T,T` – both are exactly
 `cummin`/ `cummax` (respectively) over the tri-state encoding FALSE=0,
-NA=1, TRUE=2, then decoded back to BOOL8
-(`scratchpad/phase5_window_design.md` section 0's ground truth table,
-cross-checked directly here rather than taken on faith).
+NA=1, TRUE=2, then decoded back to BOOL8.
 
 ## Usage
 

@@ -48,27 +48,32 @@ produces `NA` for that position ("NA poisoning"). `na.rm = TRUE`: a
 window is only ever `NA` because it doesn't yet have `n` physical
 elements available (the leading `n - 1` positions, always). Once a
 window has `n` elements, `NA`s within it are dropped before computing
-(an all-`NA` window still yields `NA`). This `na.rm = TRUE` behavior was
-verified empirically against `data.table::frollmean(x, n, na.rm = TRUE)`
-(not assumed): the leading incomplete positions stay `NA` even though
-na.rm is set.
+(an all-`NA` window still yields `NA`). This is what
+`data.table::frollmean(x, n, na.rm = TRUE)` does: the leading incomplete
+positions stay `NA` even with `na.rm = TRUE`.
 
 Inside
 [`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html)/[`filter()`](https://dplyr.tidyverse.org/reference/filter.html)
 on a `tbl_gpu`, `roll_mean()`/`roll_sum()`/
 `roll_min()`/`roll_max()`/`roll_sd()` (not `roll_median()`, see below)
-run GPU-natively, in time that does not depend on the window width
-(segmented scans; cudf's own rolling kernel is kept for narrow windows,
-where it is faster, and for min/max of timestamps and logicals) – these
-R implementations are the CPU semantics reference and the engine for
-standalone use. cudf 25.12 has no MEDIAN rolling aggregation, so
-`roll_median()` always runs on the CPU (see "Median engines").
-`data.table::frollmean(x, n)` (and its five siblings) work as equivalent
-GPU-native aliases inside
+run on the GPU, and per group on a grouped table; on an integer or
+double column they take time that does not depend on the window width.
+Called on an ordinary R vector, these functions run in R and give the
+same values. The result types differ in one place: `roll_min()` and
+`roll_max()` of an integer, logical, `Date` or `POSIXct` column keep
+that type on the GPU, while the R functions return a double, and so do
+dplyr on a data frame and a
+[`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html) on a
+`tbl_gpu` that runs on the CPU. The GPU library has no rolling median,
+so a [`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html) or
+[`filter()`](https://dplyr.tidyverse.org/reference/filter.html) with
+`roll_median()` runs in dplyr on the CPU (see "Median engines").
+`data.table::frollmean(x, n)` (and its siblings `frollsum()`,
+`frollmin()`, `frollmax()` and `frollsd()`) run on the GPU inside
 [`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html)/[`filter()`](https://dplyr.tidyverse.org/reference/filter.html)
-too, as long as `align`/`fill`/`adaptive` are left at their defaults
-(`"right"`, `NA`, `FALSE`) – any other value falls back / errors,
-matching this task's explicit "right-aligned only" scope.
+too, as long as `align`, `fill`, `adaptive`, `partial` and `give.names`
+keep their defaults (`"right"`, `NA`, `FALSE`, `FALSE`, `FALSE`); any
+other value runs in dplyr on the CPU.
 
 **Median engines.** By default `roll_median()` uses a built-in exact
 engine that returns exactly
@@ -103,7 +108,11 @@ written inside
 [`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html) keeps
 data.table's own result.
 
-The internal option `cuplyr.roll_path` (else the environment variable
+The GPU computes these windows in one of two ways: with scans, whose
+time does not depend on the window width, or with a direct rolling
+kernel, which is faster on narrow windows (and also used for
+`roll_min()` and `roll_max()` of dates, date-times and logicals). The
+internal option `cuplyr.roll_path` (else the environment variable
 `CUPLYR_ROLL_PATH`), one of `"auto"` (the default), `"scans"` or
-`"cudf"`, forces one of the two GPU paths. It exists for tests and
-benchmarks and changes speed, not results.
+`"cudf"`, forces one of them. It exists for tests and benchmarks and
+changes speed, not results.

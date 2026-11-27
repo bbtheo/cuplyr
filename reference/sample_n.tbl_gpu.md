@@ -13,8 +13,9 @@ and gather them on the GPU like
 A `weight`, a `size` that reads the data (a column,
 [`n()`](https://dplyr.tidyverse.org/reference/context.html)) or draws
 random numbers, and any call dplyr would raise an error for (e.g. a
-`size` larger than a group without `replace`) run on the CPU through
-[`gpu_fallback()`](https://bbtheo.github.io/cuplyr/reference/gpu_fallback.md),
+`size` larger than a group without `replace`) run in dplyr on the CPU
+(see
+[cuplyr-fallback](https://bbtheo.github.io/cuplyr/reference/cuplyr-fallback.md)),
 where dplyr raises the error and consumes the RNG itself.
 
 ## Usage

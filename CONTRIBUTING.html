@@ -7,7 +7,7 @@
 
     <a class="navbar-brand me-2" href="index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -44,11 +44,32 @@
 <p>cuplyr runs dplyr pipelines on an NVIDIA GPU through libcudf. The aim is that any dplyr pipeline gives the same answer on a GPU table as on a data frame. Bug reports, feature ideas, documentation fixes and code are all welcome.</p>
 <div class="section level2">
 <h2 id="how-work-moves">How work moves<a class="anchor" aria-label="anchor" href="#how-work-moves"></a></h2>
-<ol style="list-style-type: decimal"><li>Every bug and feature starts as a <a href="https://github.com/bbtheo/cuplyr/issues" class="external-link">GitHub issue</a>. The issue is where the approach gets discussed and agreed.</li>
+<ol style="list-style-type: decimal"><li>Every bug and feature starts as a <a href="https://github.com/bbtheo/cuplyr/issues" class="external-link">GitHub issue</a>. The issue is where the approach gets discussed and agreed. Issues are ordered on the <a href="#the-roadmap-board">roadmap board</a>.</li>
 <li>Every change lands through a pull request that links its issue with <code>Fixes #123</code>. The maintainer and coding agents work this way too.</li>
 <li>A maintainer runs <a href="#the-merge-gate">the merge gate</a> on the pull request and posts the result as a comment.</li>
 <li>A passing pull request is squash-merged, so the default branch gets one commit per pull request.</li>
 </ol><p>Typos and small documentation fixes can skip the issue. Open the pull request directly.</p>
+</div>
+<div class="section level2">
+<h2 id="the-roadmap-board">The roadmap board<a class="anchor" aria-label="anchor" href="#the-roadmap-board"></a></h2>
+<p>The <a href="https://github.com/users/bbtheo/projects/1" class="external-link">roadmap board</a> shows every open issue in priority order: the top of the list is worked on first. Each issue has a status:</p>
+<table class="table"><colgroup><col width="50%"><col width="50%"></colgroup><thead><tr><th>Status</th>
+<th>Meaning</th>
+</tr></thead><tbody><tr><td>Proposed</td>
+<td>A report or an idea. Discussion is welcome; nothing is agreed yet.</td>
+</tr><tr><td>Approved</td>
+<td>Agreed and ready to pick up, with the approach in the issue.</td>
+</tr><tr><td>In progress</td>
+<td>Someone is working on it. Its pull request, if there is one yet, is a draft.</td>
+</tr><tr><td>In review</td>
+<td>The pull request is ready for review.</td>
+</tr><tr><td>Done</td>
+<td>Merged.</td>
+</tr><tr><td>Not planned</td>
+<td>Decided against; the issue says why.</td>
+</tr></tbody></table><p>New issues start as Proposed. A maintainer moves an issue to Approved once the problem and the approach are clear, and sets the order.</p>
+<p>The <code>tbd</code> label marks an open question: a design choice, a trade-off, or whether a difference from dplyr is worth fixing. The question is in the issue’s comments. If you have a view or a use case, say so there; that is one of the most useful things an outside contributor can do.</p>
+<p>To pick up an issue, choose one that is Approved, ideally labelled <code>good first issue ❤️</code> or <code>help wanted ❤️</code>, and comment that you are taking it. A maintainer moves it to In progress so nobody else starts the same work.</p>
 </div>
 <div class="section level2">
 <h2 id="scope">Scope<a class="anchor" aria-label="anchor" href="#scope"></a></h2>
@@ -57,10 +78,11 @@
 <li>GPU code for verbs that use the CPU fallback today. The fallback stays as the safety net.</li>
 <li>Reading and writing data on the GPU, memory management, and the lazy optimizer.</li>
 <li>Installation and packaging.</li>
+<li>Column classes beyond the basic types (<code>ts</code>, <code>difftime</code>, <code>hms</code>, <code>IDate</code>, <code>POSIXlt</code> and others). Today an upload raises <code>cuplyr_error_unsupported_class</code>; the aim is that they work, natively where a GPU type fits and through the CPU route otherwise.</li>
 </ul><p>Out of scope for now:</p>
 <ul><li>General lubridate parity. lubridate functions run through the CPU fallback, apart from fixed-unit <code>floor_date()</code>, <code>ceiling_date()</code> and <code>round_date()</code>.</li>
-<li>Custom and S4 column classes (<code>ts</code>, <code>difftime</code>, <code>hms</code>, <code>IDate</code> and others). Upload raises <code>cuplyr_error_unsupported_class</code>.</li>
 <li>Multi-GPU execution.</li>
+<li>A GPU version of <code>do()</code>. <code>do()</code> works on a GPU table through the CPU fallback and stays there: it is superseded in dplyr, and it runs arbitrary R code on each group’s data frame.</li>
 </ul><p>Something outside this list can still come in. Open an issue and make the case. Changing the scope means a pull request against this section.</p>
 <div class="section level3">
 <h3 id="known-differences-from-dplyr">Known differences from dplyr<a class="anchor" aria-label="anchor" href="#known-differences-from-dplyr"></a></h3>
@@ -84,13 +106,14 @@
 <div class="section level2">
 <h2 id="proposing-a-feature">Proposing a feature<a class="anchor" aria-label="anchor" href="#proposing-a-feature"></a></h2>
 <p>Open an issue and show the code you want to work. Wait until a maintainer agrees on the approach before you write a large pull request.</p>
-<p>Issues labelled <code>help wanted ❤️</code> are agreed and open to anyone. Comment on the issue before you start so two people don’t do the same work.</p>
+<p>Issues labelled <code>help wanted ❤️</code> are agreed and open to anyone. Comment on the issue before you start so two people don’t do the same work (see <a href="#the-roadmap-board">the roadmap board</a>).</p>
 </div>
 <div class="section level2">
 <h2 id="pull-requests">Pull requests<a class="anchor" aria-label="anchor" href="#pull-requests"></a></h2>
 <ul><li>Fork the repository and branch from the default branch. Name the branch after the issue, for example <code>142-slice-sample-weights</code>.</li>
 <li>Keep one topic per pull request. A feature plus an unrelated refactor is two pull requests.</li>
 <li>Put <code>Fixes #123</code> in the description.</li>
+<li>Open the pull request as a draft early if you like, so others can see the approach and comment before it is finished. Mark it ready for review when it is done; the merge gate doesn’t run on drafts.</li>
 <li>Add a bullet to <code>NEWS.md</code> under “development version” for anything a user can see. Start with the function name and write what the user can now do.</li>
 <li>Don’t change the version in <code>DESCRIPTION</code>. Only release pull requests do.</li>
 <li>Give the pull request a conventional-commit title (<code>feat: ...</code>, <code>fix: ...</code>, <code>perf: ...</code>, <code>docs: ...</code>, <code>test: ...</code>, <code>refactor: ...</code>). The title becomes the squashed commit’s subject.</li>
@@ -116,7 +139,7 @@
 </div>
 <div class="section level2">
 <h2 id="developer-setup">Developer setup<a class="anchor" aria-label="anchor" href="#developer-setup"></a></h2>
-<p>You need Linux, an NVIDIA GPU (Volta or newer), CUDA 12.2 or newer, and <a href="https://pixi.sh" class="external-link">pixi</a>. pixi installs R, RAPIDS libcudf and every R package into the project directory.</p>
+<p>You need Linux, an NVIDIA GPU with compute capability 7.5 (Turing) or newer, a system CUDA toolkit (<code>./configure</code> accepts 12.2 or newer, but RAPIDS 26.x is tested with CUDA 13, which pixi and the installers use; it finds the toolkit through <code>CUDA_HOME</code> or <code>/usr/local/cuda</code>), and <a href="https://pixi.sh" class="external-link">pixi</a>. pixi installs R, RAPIDS libcudf and every R package into the project directory. The default pixi environment is RAPIDS 26.10, the series cuplyr is developed, tested and gated on. It carries no CUDA compiler: <code>nvcc</code> and the CUDA headers come from the system toolkit.</p>
 <div class="sourceCode" id="cb1"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb1-1"><a href="#cb1-1" tabindex="-1"></a><span class="ex">curl</span> <span class="at">-fsSL</span> https://pixi.sh/install.sh <span class="kw">|</span> <span class="fu">bash</span>   <span class="co"># once</span></span>
 <span id="cb1-2"><a href="#cb1-2" tabindex="-1"></a><span class="fu">git</span> clone https://github.com/<span class="op">&lt;</span>you<span class="op">&gt;</span>/cuplyr.git</span>
 <span id="cb1-3"><a href="#cb1-3" tabindex="-1"></a><span class="bu">cd</span> cuplyr</span>
@@ -140,9 +163,16 @@
 </tr><tr><td>Build the pkgdown site into <code>docs/</code>
 </td>
 <td><code>pixi run pkgdown</code></td>
-</tr></tbody></table><p>The test commands load the package from the source tree with <code><a href="https://pkgload.r-lib.org/reference/load_all.html" class="external-link">pkgload::load_all()</a></code>, so you don’t need to install it. They also take a file lock so two runs never share the GPU. The memory tests need that to stay stable.</p>
+</tr></tbody></table><div class="section level3">
+<h3 id="checking-against-rapids-2602">Checking against RAPIDS 26.02<a class="anchor" aria-label="anchor" href="#checking-against-rapids-2602"></a></h3>
+<p>cuplyr supports RAPIDS 26.02 and later, with 26.02 as the minimum. A second pixi environment, <code>rapids2602</code>, pins that series. Run any task in it by name:</p>
+<div class="sourceCode" id="cb2"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb2-1"><a href="#cb2-1" tabindex="-1"></a><span class="ex">pixi</span> run <span class="at">-e</span> rapids2602 test-file tests/testthat/test-filter.R</span>
+<span id="cb2-2"><a href="#cb2-2" tabindex="-1"></a><span class="ex">pixi</span> run <span class="at">-e</span> rapids2602 conformance</span></code></pre></div>
+<p>or select it for one command with <code>CUPLYR_PIXI_ENV=rapids2602 tools/conformance</code>. The <code>tools/</code> scripts pick their environment (<code>CUPLYR_PIXI_MANIFEST</code> and <code>CUPLYR_PIXI_ENV</code>) from the first of these that sets it: the <code>CUPLYR_PIXI_*</code> variable itself; the environment <code>pixi run -e &lt;env&gt;</code> or <code>pixi shell -e &lt;env&gt;</code> activated; a worktree’s untracked <code>.cuplyr-env</code> file (<code>KEY=VALUE</code> lines); the main checkout’s <code>pixi.toml</code> and its default environment. So <code>pixi run -e rapids2602 ...</code> wins over a <code>.cuplyr-env</code> that pins another series. The tools rebuild the C++ when the active RAPIDS changes (they record what <code>src/</code> was built against in <code>src/.cuplyr-build-env</code>), so you can switch back and forth in one checkout. The release check runs the dplyr conformance suite on 26.02 as well as 26.10; see the release checklist.</p>
+<p>The test commands load the package from the source tree with <code><a href="https://pkgload.r-lib.org/reference/load_all.html" class="external-link">pkgload::load_all()</a></code>, so you don’t need to install it. They also take a file lock so two runs never share the GPU. The memory tests need that to stay stable.</p>
 <p><code>pixi run install</code> installs the package into the pixi environment. Use it to try cuplyr as a user would.</p>
 <p><code>.claude/reference/architecture.md</code> explains how the code works: the AST and optimizer, joins, factors and the libcudf calls to be careful with. Read it before a larger change.</p>
+</div>
 </div>
 <div class="section level2">
 <h2 id="code-guidelines">Code guidelines<a class="anchor" aria-label="anchor" href="#code-guidelines"></a></h2>
@@ -156,7 +186,7 @@
 <li>Compare against real dplyr with <code>expect_same_as_dplyr()</code> and <code>expect_same_as_dplyr_lazy()</code> from <code>tests/testthat/helper-oracle.R</code>. Cover eager and lazy tables.</li>
 <li>Pass <code>arrange_by =</code> only where dplyr itself leaves the row order undefined.</li>
 <li>A bug fix starts with a test that fails. If the test passes before the fix, the bug isn’t understood yet.</li>
-</ul><div class="sourceCode" id="cb2"><pre class="downlit sourceCode r">
+</ul><div class="sourceCode" id="cb3"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="fu">test_that</span><span class="op">(</span><span class="st">"filter() keeps rows where the condition is TRUE"</span>, <span class="op">{</span></span>
 <span>  <span class="fu">skip_if_no_gpu</span><span class="op">(</span><span class="op">)</span></span>
 <span>  <span class="va">df</span> <span class="op">&lt;-</span> <span class="fu"><a href="https://rdrr.io/r/base/data.frame.html" class="external-link">data.frame</a></span><span class="op">(</span>x <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="fl">1</span>, <span class="cn">NA</span>, <span class="fl">3</span><span class="op">)</span>, g <span class="op">=</span> <span class="fu"><a href="https://rdrr.io/r/base/c.html" class="external-link">c</a></span><span class="op">(</span><span class="st">"a"</span>, <span class="st">"b"</span>, <span class="st">"a"</span><span class="op">)</span><span class="op">)</span></span>
@@ -186,7 +216,7 @@
 </li>
 <li>returns the version to <code>.9000</code>
 </li>
-</ul><p>Release notes name the RAPIDS version the release was built and tested against.</p>
+</ul><p>Release notes name the RAPIDS version the release was built and tested against. Before a release, run the dplyr conformance suite on the minimum supported RAPIDS too (<code>pixi run -e rapids2602 conformance</code>, see <a href="#checking-against-rapids-2602">Checking against RAPIDS 26.02</a>).</p>
 </div>
 <div class="section level2">
 <h2 id="website">Website<a class="anchor" aria-label="anchor" href="#website"></a></h2>

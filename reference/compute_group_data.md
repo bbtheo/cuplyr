@@ -1,8 +1,7 @@
 # Compute the grouping-metadata tibble shared by the whole query family
 
 Materializes `.data` if needed, then either builds the trivial
-single-row ungrouped `.rows` tibble (verified empirically against dplyr
-1.2.1:
+single-row ungrouped `.rows` tibble (as in dplyr,
 [`group_data()`](https://dplyr.tidyverse.org/reference/group_data.html)
 on an ungrouped table is one row, `.rows` holding every row 1:n in
 original order – no GPU work needed at all), or calls `gpu_group_info()`
@@ -40,7 +39,6 @@ own docs) is honored as a post-hoc R-side expansion over the (small,
 group-count-sized) result – never over the underlying GPU data – via
 `expand_dropped_groups()`.
 
-Not cached across calls (each call re-runs the GPU query): correctness
-first, per this task's own scope – see scratchpad/workflow_state.md's
-Phase 9 kickoff note. The query itself is already a single GPU groupby,
-so repeated calls are cheap relative to any actual aggregation.
+Not cached across calls (each call re-runs the GPU query). The query
+itself is a single GPU groupby, so repeated calls are cheap relative to
+any actual aggregation.

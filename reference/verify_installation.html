@@ -13,7 +13,7 @@ basic operations work."><meta property="og:image" content="https://bbtheo.github
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -72,6 +72,10 @@ basic operations work.</p>
 <dt>gpu_name</dt>
 <dd><p>Character: GPU model name, or <code>NA</code></p></dd>
 
+<dt>libcudf_version</dt>
+<dd><p>Character: the libcudf version cuplyr was built
+against (such as <code>"26.10.2"</code>), or <code>NA</code> when it is unknown</p></dd>
+
 <dt>roundtrip_ok</dt>
 <dd><p>Logical: data round-trip succeeded</p></dd>
 
@@ -82,7 +86,9 @@ basic operations work.</p>
 </dl></div>
     <div class="section level2">
     <h2 id="details">Details<a class="anchor" aria-label="anchor" href="#details"></a></h2>
-    <p>This function runs three checks in sequence:</p><ol><li><p><strong>Package load</strong>: <code><a href="https://github.com/bbtheo/cuplyr" class="external-link">library(cuplyr)</a></code> succeeds</p></li>
+    <p>This function runs four checks in sequence:</p><ol><li><p><strong>Package load</strong>: <code><a href="https://github.com/bbtheo/cuplyr" class="external-link">library(cuplyr)</a></code> succeeds</p></li>
+<li><p><strong>libcudf version</strong>: the libcudf cuplyr was built against is
+26.02 or newer (an unknown version passes)</p></li>
 <li><p><strong>GPU detection</strong>: <code><a href="gpu_details.html">gpu_details()</a></code> shows an available GPU</p></li>
 <li><p><strong>Round-trip</strong>: <code>tbl_gpu(mtcars) |&gt; filter(mpg &gt; 20) |&gt; collect()</code>
 returns correct results</p></li>

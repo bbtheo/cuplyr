@@ -1,10 +1,10 @@
 # Desugar single-column `consecutive_id(x)` into a two-stage `lag`/ `row_number`/`cumsum` formula
 
-Multi-column `consecutive_id(a, b, ...)` is not implemented this wave
-(returns `NULL`, i.e. falls back) – this is enforced for free by the
-registry entry's `arity = 1L` (a 2+-arg call fails the generic arity
-check in `ir_parse_expr()` before `parse` is ever invoked), so this
-function itself only ever sees exactly one argument.
+Multi-column `consecutive_id(a, b, ...)` is not supported (returns
+`NULL`, i.e. falls back) – this is enforced for free by the registry
+entry's `arity = 1L` (a 2+-arg call fails the generic arity check in
+`ir_parse_expr()` before `parse` is ever invoked), so this function
+itself only ever sees exactly one argument.
 
 ## Usage
 

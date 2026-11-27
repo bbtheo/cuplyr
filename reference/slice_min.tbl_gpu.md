@@ -1,23 +1,19 @@
 # Select rows with the smallest values of a variable
 
 Keeps the `n` (or `prop` fraction of) rows with the smallest `order_by`
-values, similar to
-[`dplyr::slice_min()`](https://dplyr.tidyverse.org/reference/slice.html).
-Ungrouped,
-[`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html)-grouped,
-and `by=` calls with a plain `order_by` (a bare column, or an expression
-the mutate/filter IR recognizes) all run entirely on the GPU (Phase 5,
-task W7): ungrouped via a top-k cut plus a sort of the survivors when
-the key is numeric or a date and `n` is a small share of the rows,
-otherwise a stable sort (with `cudf::rank()` for ties); grouped/`by=` on
-such a key by stable radix sorts of the row positions and per-group
-ranks, other grouped/`by=` keys via a per-group window desugar (see
-R/slice.R's module docs for the exact group-ordering rules, including
-`by=`'s first-appearance-order rule, which applies here too, not just to
-the positional slice\_\*()s). An unsupported `order_by` expression (one
-the IR can't parse) still transparently falls back to CPU evaluation
-(see
-[`gpu_fallback()`](https://bbtheo.github.io/cuplyr/reference/gpu_fallback.md)).
+values, as
+[`dplyr::slice_min()`](https://dplyr.tidyverse.org/reference/slice.html)
+does. It runs on the GPU, ungrouped, after
+[`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html) and
+with `by`, when `order_by` is a column or an expression
+[`mutate.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/mutate.tbl_gpu.md)
+runs on the GPU; any other `order_by` runs in dplyr on the CPU (see
+[cuplyr-fallback](https://bbtheo.github.io/cuplyr/reference/cuplyr-fallback.md)).
+Grouped results come group by group, as for
+[`slice_head.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/slice_head.tbl_gpu.md):
+in ascending group-key order after
+[`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html), and
+in the order each group first appears in `.data` with `by`.
 
 ## Usage
 
@@ -44,7 +40,7 @@ slice_min(
 
 - order_by:
 
-  Column (or IR-supported expression) to rank by.
+  Column, or expression of columns, to rank by.
 
 - ...:
 
@@ -57,10 +53,9 @@ slice_min(
 
 - by:
 
-  Optional on-the-fly grouping columns, GPU-native (Phase 5, task W7) –
-  see
+  Optional grouping columns for this call only, run on the GPU; see
   [`slice_head.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/slice_head.tbl_gpu.md)'s
-  `by` docs.
+  `by`.
 
 - with_ties:
 

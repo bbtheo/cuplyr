@@ -1,4 +1,4 @@
-# Rewrite window calls over one-value-per-group arguments (F123)
+# Rewrite window calls over one-value-per-group arguments
 
 Bottom-up over a parsed expression; see the section comment above.
 

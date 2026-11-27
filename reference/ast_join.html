@@ -7,7 +7,7 @@
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -96,18 +96,17 @@ by <code><a href="parse_join_by.html">parse_join_by()</a></code></p></dd>
 
 
 <dt id="arg-multiple">multiple<a class="anchor" aria-label="anchor" href="#arg-multiple"></a></dt>
-<dd><p>Character, one of "all"/"any"/"first"/"last" (dormant –
-only "all" is honored until Phase 7 J5)</p></dd>
+<dd><p>Character, one of "all"/"any"/"first"/"last"</p></dd>
 
 
 <dt id="arg-unmatched">unmatched<a class="anchor" aria-label="anchor" href="#arg-unmatched"></a></dt>
-<dd><p>Character, one or two of "drop"/"error" (dormant –
-only "drop" is honored until Phase 7 J5)</p></dd>
+<dd><p>Character, one or two of "drop"/"error"</p></dd>
 
 
 <dt id="arg-relationship">relationship<a class="anchor" aria-label="anchor" href="#arg-relationship"></a></dt>
 <dd><p><code>NULL</code> or one of the four cardinality strings
-(dormant – not enforced until Phase 7 J5)</p></dd>
+(<code>multiple</code>, <code>unmatched</code> and <code>relationship</code> are applied/checked at
+execution, see <code><a href="check_join_cardinality.html">check_join_cardinality()</a></code> in <code>R/join.R</code>)</p></dd>
 
 
 <dt id="arg-cross-by">cross_by<a class="anchor" aria-label="anchor" href="#arg-cross-by"></a></dt>

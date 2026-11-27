@@ -2,17 +2,11 @@
 
 Like
 [`count.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/count.tbl_gpu.md),
-but keeps every row and column of `x`, appending the per-group count as
-a new column (broadcast to every row in the group) instead of collapsing
-to one row per group. Sugar over
-[`group_by.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/group_by.tbl_gpu.md)
-and a grouped-aggregate
-[`mutate.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/mutate.tbl_gpu.md)
-(which natively broadcasts the per-group count/sum to every row via
-[`mutate()`](https://dplyr.tidyverse.org/reference/mutate.html)'s
-general window/aggregate machinery, Phase 5 – NA keys are grouped
-together correctly and original row order is preserved, see
-`R/window.R`/`src/ops_window.cpp`).
+but keeps every row and column of `x` and adds the group's count (or
+weighted sum) as a new column on every row of the group, as
+[`dplyr::add_count()`](https://dplyr.tidyverse.org/reference/count.html)
+does. It runs on the GPU: rows keep their original order, and `NA` keys
+form one group, as in dplyr.
 
 ## Usage
 
@@ -32,11 +26,8 @@ add_count(x, ..., wt = NULL, sort = FALSE, name = NULL, .drop = NULL)
 
   Column names or expressions to group by, as
   [`count.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/count.tbl_gpu.md).
-  If `x` is already grouped, these are added to the existing grouping
-  for computing the count, but the OUTPUT's grouping is restored to
-  `x`'s original grouping (matching
-  [`count.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/count.tbl_gpu.md)'s
-  own reconstruction rule).
+  If `x` is already grouped, they are added to its grouping for the
+  count; the result keeps `x`'s own grouping.
 
 - wt:
 
@@ -45,28 +36,27 @@ add_count(x, ..., wt = NULL, sort = FALSE, name = NULL, .drop = NULL)
 
 - sort:
 
-  If `TRUE`, sorts the result in descending order of the count column
-  (note: since no rows are collapsed, ties – and non-tied rows within
-  the same group – are far more common than in
-  [`count()`](https://dplyr.tidyverse.org/reference/count.html)).
+  If `TRUE`, sorts the result in descending order of the count column.
+  No rows are collapsed, so every row of a group ties with the others;
+  the sort is stable and keeps their order.
 
 - name:
 
   The name of the count column. If `NULL` (default), uses `"n"`, or
-  `"nn"`/`"nnn"`/... if `"n"` already names ANY existing column of `x`
-  (not just a group column – verified empirically against dplyr 1.2.1 to
-  differ from
-  [`count()`](https://dplyr.tidyverse.org/reference/count.html)'s own
-  narrower check; see this file's header comment).
+  `"nn"`/`"nnn"`/... if `"n"` already names any column of `x` (where
+  [`count.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/count.tbl_gpu.md)
+  and
+  [`tally.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/tally.tbl_gpu.md)
+  look at the grouping columns only), as in dplyr.
 
 - .drop:
 
-  Deprecated in dplyr 1.0.0 (and here); errors if supplied.
+  Deprecated in dplyr 1.0.0; supplying it is an error, as in dplyr.
 
 ## Value
 
-A `tbl_gpu` with the same rows as `x`, plus the count column, grouped
-the same as `x` was originally.
+A `tbl_gpu` with the same rows as `x`, plus the count column, grouped as
+`x` is.
 
 ## See also
 

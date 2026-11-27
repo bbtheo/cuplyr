@@ -6,8 +6,6 @@ Checks whether an object inherits from the `tbl_gpu` class.
 
 ``` r
 is_tbl_gpu(x)
-
-is_gibble(x)
 ```
 
 ## Arguments

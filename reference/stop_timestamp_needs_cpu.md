@@ -1,4 +1,4 @@
-# Signal a type error dplyr resolves for a timestamp operand (F32)
+# Signal a type error dplyr resolves for a timestamp operand
 
 The timestamp sibling of
 [`stop_factor_needs_cpu()`](https://bbtheo.github.io/cuplyr/reference/stop_factor_needs_cpu.md):

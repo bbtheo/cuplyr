@@ -3,9 +3,10 @@
 
 lazy + pending ops: returns .data$lazy_ops as-is.
 lazy + no pending ops: returns a fresh ast_source(.data$schema),
-matching the historical lazy-verb convention (e.g. the now-deleted
-filter_lazy(), select_lazy()) of leaving the source pointer unset; compute()/
-collect() supply .data$ptr as the lowering fallback source_ptr.
+leaving the source pointer unset; compute()/
+collect() supply .data$ptr as the lowering fallback source_ptr. A table
+that is the result of a CPU step (.data$origin, #10) hands its history to
+the source, for explain().
 eager: returns a fresh ast_source(.data$schema, source_ptr = .data$ptr)
 so push_op() can call lower_and_execute() immediately without a
 separate source table.
@@ -14,9 +15,10 @@ separate source table.
 
 lazy + pending ops: returns .data$lazy_ops as-is.
 lazy + no pending ops: returns a fresh ast_source(.data$schema),
-matching the historical lazy-verb convention (e.g. the now-deleted
-filter_lazy(), select_lazy()) of leaving the source pointer unset; compute()/
-collect() supply .data$ptr as the lowering fallback source_ptr.
+leaving the source pointer unset; compute()/
+collect() supply .data$ptr as the lowering fallback source_ptr. A table
+that is the result of a CPU step (.data$origin, #10) hands its history to
+the source, for explain().
 eager: returns a fresh ast_source(.data$schema, source_ptr = .data$ptr)
 so push_op() can call lower_and_execute() immediately without a
 separate source table.
@@ -29,7 +31,7 @@ separate source table.
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -66,9 +68,10 @@ separate source table.
 
 <ul><li><p>lazy + pending ops: returns <code>.data$lazy_ops</code> as-is.</p></li>
 <li><p>lazy + no pending ops: returns a fresh <code>ast_source(.data$schema)</code>,
-matching the historical lazy-verb convention (e.g. the now-deleted
-<code>filter_lazy()</code>, <code>select_lazy()</code>) of leaving the source pointer unset; <code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">compute()</a></code>/
-<code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collect()</a></code> supply <code>.data$ptr</code> as the lowering fallback <code>source_ptr</code>.</p></li>
+leaving the source pointer unset; <code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">compute()</a></code>/
+<code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collect()</a></code> supply <code>.data$ptr</code> as the lowering fallback <code>source_ptr</code>. A table
+that is the result of a CPU step (<code>.data$origin</code>, #10) hands its history to
+the source, for <code><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain()</a></code>.</p></li>
 <li><p>eager: returns a fresh <code>ast_source(.data$schema, source_ptr = .data$ptr)</code>
 so <code><a href="push_op.html">push_op()</a></code> can call <code><a href="lower_and_execute.html">lower_and_execute()</a></code> immediately without a
 separate source table.</p></li>

@@ -1,4 +1,4 @@
-# Drop rows of a GPU table where conditions are TRUE
+# Drop rows that match a condition
 
 The complement of
 [`filter.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/filter.tbl_gpu.md),
@@ -7,11 +7,10 @@ like
 all conditions are combined with AND first, then the rows where that
 combination is `TRUE` are dropped. Rows where it is `FALSE` or `NA` are
 kept (so this is not `filter(!cond)`). With no conditions every row is
-dropped. It runs on the same engine as
-[`filter()`](https://dplyr.tidyverse.org/reference/filter.html) (same
-expression surface, window predicates, `.by`, CPU fallbacks, eager and
-lazy): the predicate pushed to the GPU is `is.na(P) | !P` for the
-combined `P`.
+dropped. It runs like
+[`filter()`](https://dplyr.tidyverse.org/reference/filter.html): the
+same conditions run on the GPU, with the same window predicates, `.by`,
+CPU fallbacks, and eager and lazy modes.
 
 ## Usage
 
@@ -33,15 +32,13 @@ filter_out(.data, ..., .by = NULL, .preserve = FALSE)
 
 - .by:
 
-  Optional on-the-fly grouping columns (tidyselect), GPU-native (Phase
-  5, task W6): `filter(df, x > mean(x), .by = g)` behaves identically to
-  `df |> group_by(g) |> filter(x > mean(x)) |> ungroup()` – same
-  window/aggregate-predicate machinery as
-  [`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html)-driven
-  filtering, and the result is always ungrouped. Supplying `.by` when
-  `.data` is already grouped (via
+  Optional grouping columns for this call only (tidyselect), run on the
+  GPU: `filter(df, x > mean(x), .by = g)` gives the same rows as
+  `df |> group_by(g) |> filter(x > mean(x)) |> ungroup()`, and the
+  result is ungrouped. Supplying `.by` when `.data` is already grouped
+  (via
   [`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html))
-  is an error, matching dplyr exactly.
+  is an error, as in dplyr.
 
 - .preserve:
 

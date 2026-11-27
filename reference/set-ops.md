@@ -1,12 +1,34 @@
 # Set operations on `tbl_gpu` tables
 
-GPU-native implementations of dplyr's row-set operations, composed
-entirely from existing verbs
-([`bind_rows()`](https://bbtheo.github.io/cuplyr/reference/bind_rows.md)/[`distinct()`](https://dplyr.tidyverse.org/reference/distinct.html)/[`semi_join()`](https://dplyr.tidyverse.org/reference/filter-joins.html)/
-[`anti_join()`](https://dplyr.tidyverse.org/reference/filter-joins.html))
-– see the file header comment in `R/sets.R` for the exact composition
-and the empirically-verified row-order/column- compatibility contracts
-(mirroring `dplyr:::is_compatible()` / `check_compatible()`).
+dplyr's row-set operations on GPU tables, run on the GPU:
+
+- [`union()`](https://generics.r-lib.org/reference/setops.html): the
+  distinct rows of `x`, in `x`'s order, then the rows of `y` not already
+  in `x`, in `y`'s order.
+
+- [`union_all()`](https://dplyr.tidyverse.org/reference/setops.html):
+  the rows of `x` (duplicates kept), then those of `y`.
+
+- [`intersect()`](https://generics.r-lib.org/reference/setops.html) and
+  [`setdiff()`](https://generics.r-lib.org/reference/setops.html):
+  distinct rows of `x`, in `x`'s order, that are (or are not) in `y`.
+
+- [`symdiff()`](https://dplyr.tidyverse.org/reference/setops.html): the
+  rows of `setdiff(x, y)`, then those of `setdiff(y, x)`.
+
+- [`setequal()`](https://generics.r-lib.org/reference/setops.html):
+  `TRUE` or `FALSE`, ignoring row order and duplicates on both sides.
+
+As in dplyr, `x` and `y` must have the same column names (the order may
+differ: `y` is reordered to `x`'s), and each column must have a common
+type: logical, integer and double columns combine to the wider type, a
+logical or integer column with an integer64 one gives integer64
+(integer64 and double have no common type: an error, as in dplyr), a
+`Date` and a `POSIXct` combine to `POSIXct`, two factors with different
+levels combine to a factor with the union of the levels, and a factor
+next to a character column gives a character column. A column-type mix
+that dplyr refuses (integer vs. character, factor vs. integer, ...) is
+an error naming the column and both types.
 
 ## Usage
 
@@ -45,23 +67,17 @@ setequal(x, y, ...)
 
 ## Value
 
-A `tbl_gpu` with `x`'s column order/grouping (see the file header
-comment for the exact row-order contract per verb), except
-[`setequal()`](https://generics.r-lib.org/reference/setops.html) which
-returns a plain `TRUE`/`FALSE`.
+A `tbl_gpu` with `x`'s column order and grouping, with the rows in the
+order described above, except
+[`setequal()`](https://generics.r-lib.org/reference/setops.html), which
+returns `TRUE` or `FALSE`.
 
 ## Details
 
-Two factor columns with different level sets (level-union remap,
-`gpu_remap_codes()`) and a factor column vs. a character column (decode
-to labels, `gpu_decode_factor()`) are both GPU-native as of Phase 11 L2.
-A `Date` column vs. a `POSIXct` column (dplyr promotes to `POSIXct`) is
-ALSO GPU-native as of Phase 11 L3 (`gpu_cast_column()` gained the
-`TIMESTAMP_DAYS` -\> `TIMESTAMP_MICROSECONDS` cast, among the other 4
-timestamp-granularity targets) – no column-type combination that real
-dplyr accepts still needs the CPU fallback (`$needs_fallback` is always
-`FALSE`, see
-[`check_set_op_compatible()`](https://bbtheo.github.io/cuplyr/reference/check_set_op_compatible.md)).
-Every column-type mismatch that's a genuine error in real dplyr (e.g.
-integer vs. character, or factor vs. integer) errors here too, naming
-the offending column and both types.
+These run in dplyr on the CPU: tables with duplicated column names; a
+`Date` column next to a `POSIXct` column in a zone other than UTC (the
+`Date` becomes local midnight of that zone); a column with element names
+or a one-column matrix column, which dplyr combines by its own rules
+(except in
+[`setequal()`](https://generics.r-lib.org/reference/setops.html)); and a
+rowwise `x`.

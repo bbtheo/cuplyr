@@ -1,4 +1,4 @@
-# Parse a lubridate floor_date()/ceiling_date()/round_date() call (F46)
+# Parse a lubridate floor_date()/ceiling_date()/round_date() call
 
 Native only for a UTC-equivalent POSIXct with unit
 second/minute/hour/day and a Date with day/week (week starting Sunday,

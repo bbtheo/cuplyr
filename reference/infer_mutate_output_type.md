@@ -1,7 +1,6 @@
 # Infer output type for a mutate expression
 
-Implements D5's ordered promotion rules (see
-`scratchpad/unification_design.md`). Note this deliberately mirrors R's
+Applies ordered type-promotion rules. Note this deliberately mirrors R's
 own arithmetic promotion, not SQL/cudf defaults: `2L^2L` is a double in
 R, and `TRUE+TRUE` is an integer, and dplyr agrees with both.
 

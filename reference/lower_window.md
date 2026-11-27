@@ -1,12 +1,11 @@
 # Lower window node
 
-Phase 5, task W2 (`scratchpad/phase5_window_design.md` section 2.1):
-binds every spec's `value_col`/`order_cols` (and the node's own
+Binds every spec's `value_col`/`order_cols` (and the node's own
 `group_cols`) to 0-based indices against `ast$input`'s schema, groups
 the specs into "frames" keyed by `(order_cols, order_desc)`, and hands
 ONE `gpu_window()` call (`src/ops_window.cpp`) to the C++ side: the
 six-step stable-sort / gather / groupby-scan-or-shift / scatter-back
-algorithm (section 2.2).
+algorithm.
 
 ## Usage
 
@@ -22,8 +21,7 @@ columns) is simply the spec's position in `ast$specs` – the same order
 so the two always agree on where a given spec's result lands in the
 final schema.
 
-As of Phase 5 task W4, every window kind is lowerable: the "shift"
-family
+Every window kind is lowerable: the "shift" family
 ([`lag()`](https://dplyr.tidyverse.org/reference/lead-lag.html)/[`lead()`](https://dplyr.tidyverse.org/reference/lead-lag.html)),
 the "scan" family
 ([`cumsum()`](https://rdrr.io/r/base/cumsum.html)/[`cummax()`](https://rdrr.io/r/base/cumsum.html)/
@@ -37,9 +35,8 @@ and the "agg" family
 ([`mean()`](https://rdrr.io/r/base/mean.html)/[`sum()`](https://rdrr.io/r/base/sum.html)/[`min()`](https://rdrr.io/r/base/Extremes.html)/[`max()`](https://rdrr.io/r/base/Extremes.html)/[`n()`](https://dplyr.tidyverse.org/reference/context.html)/[`sd()`](https://rdrr.io/r/stats/sd.html)/[`var()`](https://rdrr.io/r/stats/cor.html)/[`first()`](https://dplyr.tidyverse.org/reference/nth.html)/
 [`last()`](https://dplyr.tidyverse.org/reference/nth.html)/[`nth()`](https://dplyr.tidyverse.org/reference/nth.html))
 – see
-[`validate_window_spec()`](https://bbtheo.github.io/cuplyr/reference/validate_window_spec.md).
-A later task (the rolling-window benchmark, scratchpad/todo.md) adds a
-sixth, "rolling"
+[`validate_window_spec()`](https://bbtheo.github.io/cuplyr/reference/validate_window_spec.md)
+– plus the "rolling" family
 ([`roll_mean()`](https://bbtheo.github.io/cuplyr/reference/roll.md)/[`roll_sum()`](https://bbtheo.github.io/cuplyr/reference/roll.md)/[`roll_min()`](https://bbtheo.github.io/cuplyr/reference/roll.md)/[`roll_max()`](https://bbtheo.github.io/cuplyr/reference/roll.md)/[`roll_sd()`](https://bbtheo.github.io/cuplyr/reference/roll.md),
 but NOT
 [`roll_median()`](https://bbtheo.github.io/cuplyr/reference/roll.md) –

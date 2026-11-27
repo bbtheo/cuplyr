@@ -55,10 +55,10 @@ either
 
 ## Details
 
-A narrower `required_cols` (F99: what a barrier above reads) is settled
-when the requirement walked down the chain needs no select above a
-filter, finds no dead mutate expression and keeps every source column.
-One set does for both passes: a mutate's new outputs, the only names
-projection pushdown takes back out of its requirement, are neither
-source columns nor a lower node's input, so they change no answer here.
-When every output is required the walk passes by the induction above.
+A narrower `required_cols` (what a barrier above reads) is settled when
+the requirement walked down the chain needs no select above a filter,
+finds no dead mutate expression and keeps every source column. One set
+does for both passes: a mutate's new outputs, the only names projection
+pushdown takes back out of its requirement, are neither source columns
+nor a lower node's input, so they change no answer here. When every
+output is required the walk passes by the induction above.

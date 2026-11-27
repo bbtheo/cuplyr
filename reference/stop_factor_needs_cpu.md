@@ -1,4 +1,4 @@
-# Signal a type error caused by a factor operand (F18)
+# Signal a type error caused by a factor operand
 
 The GPU types a factor as DICTIONARY32 and can't combine it with
 anything else, but dplyr can (vctrs makes `factor` + `character` a

@@ -15,8 +15,8 @@
 <script src="deps/bootstrap-5.3.8/bootstrap.bundle.min.js"></script><link href="deps/font-awesome-6.5.2/css/all.min.css" rel="stylesheet">
 <link href="deps/font-awesome-6.5.2/css/v4-shims.min.css" rel="stylesheet">
 <script src="deps/headroom-0.11.0/headroom.min.js"></script><script src="deps/headroom-0.11.0/jQuery.headroom.min.js"></script><script src="deps/bootstrap-toc-1.0.1/bootstrap-toc.min.js"></script><script src="deps/clipboard.js-2.0.11/clipboard.min.js"></script><script src="deps/search-1.0.0/autocomplete.jquery.min.js"></script><script src="deps/search-1.0.0/fuse.min.js"></script><script src="deps/search-1.0.0/mark.min.js"></script><!-- pkgdown --><script src="pkgdown.js"></script><meta property="og:title" content="GPU-Accelerated Data Manipulation with Dplyr Syntax">
-<meta name="description" content="Provides a dplyr backend that executes operations on NVIDIA GPUs using the RAPIDS libcudf library. Supports filter, select, mutate, arrange, group_by, summarise, and join operations with familiar tidyverse syntax while achieving significant speedups on large datasets.">
-<meta property="og:description" content="Provides a dplyr backend that executes operations on NVIDIA GPUs using the RAPIDS libcudf library. Supports filter, select, mutate, arrange, group_by, summarise, and join operations with familiar tidyverse syntax while achieving significant speedups on large datasets.">
+<meta name="description" content="Provides a dplyr backend that runs dplyr verbs on NVIDIA GPUs using the RAPIDS libcudf library. Tables are lazy by default, so a whole pipeline is optimized before it runs, and verbs or expressions with no GPU implementation run in dplyr on the CPU with the same result.">
+<meta property="og:description" content="Provides a dplyr backend that runs dplyr verbs on NVIDIA GPUs using the RAPIDS libcudf library. Tables are lazy by default, so a whole pipeline is optimized before it runs, and verbs or expressions with no GPU implementation run in dplyr on the CPU with the same result.">
 <meta property="og:image" content="https://bbtheo.github.io/cuplyr/logo.png">
 </head>
 <body>
@@ -27,7 +27,7 @@
 
     <a class="navbar-brand me-2" href="index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -131,18 +131,13 @@
 </li>
 </ul>
 </li>
-<li>rolling windows with <code><a href="reference/roll.html">roll_mean()</a></code>, <code><a href="reference/roll.html">roll_sum()</a></code>, <code><a href="reference/roll.html">roll_median()</a></code>, <code><a href="reference/roll.html">roll_min()</a></code>, <code><a href="reference/roll.html">roll_max()</a></code> and <code><a href="reference/roll.html">roll_sd()</a></code>
-</li>
+<li>rolling windows with <code><a href="reference/roll.html">roll_mean()</a></code>, <code><a href="reference/roll.html">roll_sum()</a></code>, <code><a href="reference/roll.html">roll_min()</a></code>, <code><a href="reference/roll.html">roll_max()</a></code> and <code><a href="reference/roll.html">roll_sd()</a></code> (<code><a href="reference/roll.html">roll_median()</a></code> runs on the CPU)</li>
 <li>Parquet files, read and written on the GPU with <code><a href="reference/read_parquet_gpu.html">read_parquet_gpu()</a></code> and <code><a href="reference/read_parquet_gpu.html">write_parquet_gpu()</a></code>
 </li>
 </ul>
 <p>Anything else falls back to the CPU. cuplyr collects the data, runs dplyr and uploads the result. Your code still works, but the data makes a round trip. The fallback is silent by default. Set <code>options(cuplyr.fallback = "warn")</code> to see each fallback with its expression and reason, or <code>"error"</code> to forbid them.</p>
 <p>Column types:</p>
 <table class="table">
-<colgroup>
-<col width="50%">
-<col width="50%">
-</colgroup>
 <thead><tr>
 <th>R</th>
 <th>GPU</th>
@@ -178,18 +173,19 @@
 </tr>
 <tr>
 <td>integer64</td>
-<td>FLOAT64, with a warning: values above 2^53 lose precision</td>
+<td>INT64, exact; <code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collect()</a></code> gives back <code><a href="https://bit64.r-lib.org/reference/bit64-package.html" class="external-link">bit64::integer64</a></code>
+</td>
 </tr>
 </tbody>
 </table>
-<p>Not supported: list columns, other column classes and more than one GPU. Uploading a <code>difftime</code>, <code>hms</code> or <code>ts</code> column raises an error. The <a href="https://github.com/bbtheo/cuplyr/issues" class="external-link">open issues</a> track what is planned.</p>
+<p>Not supported: list columns, other column classes and more than one GPU. Uploading a <code>difftime</code>, <code>hms</code> or <code>ts</code> column raises an error. The <a href="https://github.com/bbtheo/cuplyr/issues" class="external-link">open issues</a> track what is planned, in priority order on the <a href="https://github.com/users/bbtheo/projects/1" class="external-link">roadmap board</a>.</p>
 </div>
 <div class="section level2">
 <h2 id="lazy-by-default">Lazy by default<a class="anchor" aria-label="anchor" href="#lazy-by-default"></a>
 </h2>
 <p><code><a href="reference/tbl_gpu.html">tbl_gpu()</a></code> is lazy. Each verb checks its arguments and records a step, so a typo or type error still fails at the verb that caused it. Nothing runs until you <code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">collect()</a></code> the result into R or <code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">compute()</a></code> it into a table that stays on the GPU. Then cuplyr optimizes the whole plan, runs it and frees every intermediate column.</p>
 <p>Printing a lazy table runs the plan to show the first rows and keeps nothing. Print it twice and it runs twice. <code><a href="https://dplyr.tidyverse.org/reference/compute.html" class="external-link">compute()</a></code> a table you want to look at often.</p>
-<p><code><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain()</a></code> shows the recorded steps and the plan the optimizer will run:</p>
+<p><code><a href="https://dplyr.tidyverse.org/reference/explain.html" class="external-link">explain()</a></code> prints the plan the optimizer will run as R code: the steps in order, the columns each source reads, and any step that fell back to the CPU, with the reason. <code>show_query(optimized = FALSE)</code> prints the steps as you wrote them. Neither runs anything:</p>
 <div class="sourceCode" id="cb2"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="fu"><a href="reference/tbl_gpu.html">tbl_gpu</a></span><span class="op">(</span><span class="va">mtcars</span><span class="op">)</span> <span class="op">|&gt;</span></span>
 <span>  <span class="fu"><a href="https://dplyr.tidyverse.org/reference/filter.html" class="external-link">filter</a></span><span class="op">(</span><span class="va">mpg</span> <span class="op">&gt;</span> <span class="fl">20</span><span class="op">)</span> <span class="op">|&gt;</span></span>
@@ -236,40 +232,60 @@
 <p><code><a href="articles/performance.html">vignette("performance")</a></code> has the method, eager timings, memory per call and the other cases where dplyr wins. <code><a href="articles/memory.html">vignette("memory")</a></code> explains how cuplyr allocates GPU memory and when <code><a href="reference/gpu_gc.html">gpu_gc()</a></code> gives it back.</p>
 </div>
 <div class="section level2">
-<h2 id="gibbles">Gibbles<a class="anchor" aria-label="anchor" href="#gibbles"></a>
-</h2>
-<p>cuplyr’s tables are called gibbles. They print as <code># A gibble:</code>, or <code># A gibble [lazy]:</code> with pending steps. <code><a href="reference/tbl_gpu.html">gibble()</a></code>, <code><a href="reference/as_tbl_gpu.html">as_gibble()</a></code> and <code><a href="reference/is_tbl_gpu.html">is_gibble()</a></code> are aliases of <code><a href="reference/tbl_gpu.html">tbl_gpu()</a></code>, <code><a href="reference/as_tbl_gpu.html">as_tbl_gpu()</a></code> and <code><a href="reference/is_tbl_gpu.html">is_tbl_gpu()</a></code>. The CRAN package gibble also has a <code><a href="reference/tbl_gpu.html">gibble()</a></code> function. <code><a href="reference/tbl_gpu.html">?gibble</a></code> explains which one wins when both are attached.</p>
-</div>
-<div class="section level2">
 <h2 id="installation">Installation<a class="anchor" aria-label="anchor" href="#installation"></a>
 </h2>
-<p>You need Linux x86_64 and:</p>
-<table class="table"><tbody>
+<p>The conda and pixi package below needs only Linux x86_64, an NVIDIA GPU with compute capability 7.5 (Turing) or newer and a driver that supports CUDA 13. It brings its own R and libraries, and needs no CUDA toolkit or compiler.</p>
+<p>To build from source (the install script), you need Linux x86_64 and:</p>
+<table class="table">
+<colgroup>
+<col width="50%">
+<col width="50%">
+</colgroup>
+<tbody>
 <tr>
 <td>NVIDIA GPU</td>
-<td>compute capability 7.0 (Volta) or newer</td>
+<td>compute capability 7.5 (Turing) or newer</td>
 </tr>
 <tr>
 <td>CUDA Toolkit</td>
-<td>12.2 or newer</td>
+<td>12.2 or newer (RAPIDS 26.x is tested with CUDA 13, which the installers and pixi use)</td>
 </tr>
 <tr>
 <td>RAPIDS libcudf</td>
-<td>25.12 or newer</td>
+<td>26.02 or newer (developed and tested on 26.10)</td>
 </tr>
 <tr>
 <td>R</td>
 <td>4.3 or newer</td>
 </tr>
-</tbody></table>
-<p>The install script clones cuplyr, finds CUDA and libcudf through pixi, conda or your system (in that order), and builds the package:</p>
+</tbody>
+</table>
+<p>Volta (7.0) GPUs are not supported: that would need a source build against a CUDA 12 RAPIDS, which no install route provides.</p>
+<p>The install script clones cuplyr, finds libcudf through pixi, conda or your system (in that order), and builds the package. The pixi environment carries libcudf and the CUDA 13 build tools (<code>nvcc</code> and the CUDA headers), so <code>--method=pixi</code> needs only a system C++ compiler; a system toolkit set through <code>CUDA_HOME</code> still wins. The conda method installs <code>cuda-nvcc</code> into its environment itself:</p>
 <div class="sourceCode" id="cb4"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb4-1"><a href="#cb4-1" tabindex="-1"></a><span class="ex">curl</span> <span class="at">-fsSL</span> https://raw.githubusercontent.com/bbtheo/cuplyr/main/install.sh <span class="kw">|</span> <span class="fu">bash</span></span></code></pre></div>
 <p>To pick the method yourself, pass <code>--method=pixi</code>, <code>--method=conda</code> or <code>--method=system</code>. <code>--dry-run</code> shows what the script would do. From a clone, run <code>./install.sh</code> with the same options.</p>
-<p>Then check the installation from R:</p>
-<div class="sourceCode" id="cb5"><pre class="downlit sourceCode r">
+<div class="section level3">
+<h3 id="conda-and-pixi">conda and pixi<a class="anchor" aria-label="anchor" href="#conda-and-pixi"></a>
+</h3>
+<p>The conda package <code>r-cuplyr</code> is published on the <code>bbtheo</code> channel on anaconda.org. It is a binary built against RAPIDS libcudf 26.10 and CUDA 13, so it needs no compiler or CUDA toolkit on your machine, only an NVIDIA driver that supports CUDA 13. Install it into an active conda environment (for a new one, run <code>conda create -n cuplyr</code> and <code>conda activate cuplyr</code> first):</p>
+<div class="sourceCode" id="cb5"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb5-1"><a href="#cb5-1" tabindex="-1"></a><span class="ex">conda</span> install <span class="at">-c</span> bbtheo <span class="at">-c</span> rapidsai <span class="at">-c</span> conda-forge <span class="at">-c</span> nvidia r-cuplyr</span></code></pre></div>
+<p><code>mamba</code> takes the same arguments. If your conda configuration sets strict channel priority and the solve fails, add <code>--no-channel-priority</code>.</p>
+<p>With pixi, create a project with the same channels and add the package:</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode bash"><code class="sourceCode bash"><span id="cb6-1"><a href="#cb6-1" tabindex="-1"></a><span class="ex">pixi</span> init <span class="at">-c</span> bbtheo <span class="at">-c</span> rapidsai <span class="at">-c</span> conda-forge <span class="at">-c</span> nvidia cuplyr-project</span>
+<span id="cb6-2"><a href="#cb6-2" tabindex="-1"></a><span class="bu">cd</span> cuplyr-project</span>
+<span id="cb6-3"><a href="#cb6-3" tabindex="-1"></a><span class="ex">pixi</span> add r-cuplyr</span></code></pre></div>
+<p>Then start R in the project with <code>pixi run R</code> (or <code>pixi shell</code>, then <code>R</code>).</p>
+<p>How the package is built and published is described in <a href="https://github.com/bbtheo/cuplyr/blob/main/conda/README.md" class="external-link">conda/README.md</a>.</p>
+</div>
+<div class="section level3">
+<h3 id="check-the-installation">Check the installation<a class="anchor" aria-label="anchor" href="#check-the-installation"></a>
+</h3>
+<p>Check the installation from R:</p>
+<div class="sourceCode" id="cb7"><pre class="downlit sourceCode r">
 <code class="sourceCode R"><span><span class="kw"><a href="https://rdrr.io/r/base/library.html" class="external-link">library</a></span><span class="op">(</span><span class="va"><a href="https://github.com/bbtheo/cuplyr" class="external-link">cuplyr</a></span><span class="op">)</span></span>
 <span><span class="fu"><a href="reference/verify_installation.html">verify_installation</a></span><span class="op">(</span><span class="op">)</span></span></code></pre></div>
 <p>If something is wrong, <code><a href="reference/check_deps.html">check_deps()</a></code> lists what is missing. <code><a href="reference/diagnostics.html">diagnostics()</a></code> prints the system details to paste into a bug report.</p>
+</div>
 </div>
 <div class="section level2">
 <h2 id="learn-more">Learn more<a class="anchor" aria-label="anchor" href="#learn-more"></a>

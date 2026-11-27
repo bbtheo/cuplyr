@@ -5,15 +5,15 @@ compute each output column's post-suffix NAME and which side's SOURCE
 column it came from (`origin`/`source_names`, parallel to `names`) –
 this reattaches `factor_levels`, keyed by that post-suffix output name,
 by looking up each output column's own origin schema's `factor_levels`
-under its PRE-suffix source name. This is the Bug 1 fix (Phase 11 L2):
-before this, `build_join_schema()` returned only `names`/`types`, so
-every mutating join
-([`left_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html)/[`inner_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html)/[`full_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html)/[`right_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html),
+under its pre-suffix source name. Without it, `build_join_schema()`
+returns only `names`/`types`, so every mutating join
+([`left_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html)/[`inner_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html)/
+[`full_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html)/[`right_join()`](https://dplyr.tidyverse.org/reference/mutate-joins.html),
 and
 [`cross_join()`](https://dplyr.tidyverse.org/reference/cross_join.html))
-silently dropped factor metadata entirely –
+would drop the factor metadata and
 [`collect()`](https://dplyr.tidyverse.org/reference/compute.html) would
-then present a factor column as raw integer codes.
+show a factor column as raw integer codes.
 
 ## Usage
 

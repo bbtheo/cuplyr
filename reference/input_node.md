@@ -3,11 +3,13 @@
 - lazy + pending ops: returns `.data$lazy_ops` as-is.
 
 - lazy + no pending ops: returns a fresh `ast_source(.data$schema)`,
-  matching the historical lazy-verb convention (e.g. the now-deleted
-  `filter_lazy()`, `select_lazy()`) of leaving the source pointer unset;
+  leaving the source pointer unset;
   [`compute()`](https://dplyr.tidyverse.org/reference/compute.html)/
   [`collect()`](https://dplyr.tidyverse.org/reference/compute.html)
-  supply `.data$ptr` as the lowering fallback `source_ptr`.
+  supply `.data$ptr` as the lowering fallback `source_ptr`. A table that
+  is the result of a CPU step (`.data$origin`, \#10) hands its history
+  to the source, for
+  [`explain()`](https://dplyr.tidyverse.org/reference/explain.html).
 
 - eager: returns a fresh
   `ast_source(.data$schema, source_ptr = .data$ptr)` so

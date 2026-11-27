@@ -1,22 +1,17 @@
 # Select rows by position
 
-Keeps rows of a GPU table by integer position, similar to
-[`dplyr::slice()`](https://dplyr.tidyverse.org/reference/slice.html).
-Ungrouped,
-[`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html)-grouped,
-and `.by=` calls with plain, data-independent index expressions all run
-entirely on the GPU (Phase 5, task W7): ungrouped via a direct
-`cudf::gather()`; grouped/ `.by=` via a per-group
-[`row_number()`](https://dplyr.tidyverse.org/reference/row_number.html)
-desugar (R/slice.R's module docs), restricted to a strictly increasing
-positive index vector or any set of negative indices (arbitrary
-duplication/reordering is ungrouped-only – see `...`'s docs below).
-Everything else (an index expression the GPU-native path can't evaluate
-without a data mask, e.g. one that references a column or
+Keeps rows of a GPU table by integer position, as
+[`dplyr::slice()`](https://dplyr.tidyverse.org/reference/slice.html)
+does. Constant positions run on the GPU, ungrouped, after
+[`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html) and
+with `.by`. With groups, only a strictly increasing positive index
+vector or a set of negative indices runs on the GPU (an ungrouped table
+also takes duplicated and reordered positions; see `...` below).
+Anything else runs in dplyr on the CPU (see
+[cuplyr-fallback](https://bbtheo.github.io/cuplyr/reference/cuplyr-fallback.md)):
+an index expression that needs the data, e.g. one that reads a column or
 [`n()`](https://dplyr.tidyverse.org/reference/context.html), or a
-grouped/`.by=` index vector with duplicates/reordering) transparently
-falls back to CPU evaluation (see
-[`gpu_fallback()`](https://bbtheo.github.io/cuplyr/reference/gpu_fallback.md)).
+grouped or `.by` index vector with duplicated or reordered positions.
 
 ## Usage
 
@@ -36,21 +31,21 @@ slice(.data, ..., .by = NULL, .preserve = FALSE)
 
   Integer row positions, e.g. `slice(df, 1:3)`. Duplicates and
   reordering are allowed for positive indices when `.data` is ungrouped
-  and `.by=` isn't supplied (`slice(df, c(3, 1, 1))`); grouped/`.by=`
-  calls only run natively for a strictly increasing, duplicate-free
-  positive index vector (falling back to CPU otherwise); negative
-  indices drop those rows instead (order/duplicates never matter here,
-  grouped or not); `0`/`NA` are silently dropped; out-of-range positions
-  are silently dropped; positive and negative indices cannot be mixed.
+  and `.by=` isn't supplied (`slice(df, c(3, 1, 1))`); grouped or `.by`
+  calls run on the GPU only for a strictly increasing, duplicate-free
+  positive index vector (and on the CPU otherwise); negative indices
+  drop those rows instead (order/duplicates never matter here, grouped
+  or not); `0`/`NA` are silently dropped; out-of-range positions are
+  silently dropped; positive and negative indices cannot be mixed.
 
 - .by:
 
-  Optional on-the-fly grouping columns, GPU-native (Phase 5, task W7):
-  result rows are ordered by each group's FIRST-APPEARANCE position in
-  `.data` (see module docs), and the result is always ungrouped.
-  Supplying `.by` when `.data` is already grouped (via
+  Optional grouping columns for this call only, run on the GPU. As in
+  dplyr, the result has the groups in the order each one first appears
+  in `.data`, and it is ungrouped. Supplying `.by` when `.data` is
+  already grouped (via
   [`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html))
-  is an error, matching dplyr.
+  is an error, as in dplyr.
 
 - .preserve:
 
@@ -72,3 +67,14 @@ slice(.data, ..., .by = NULL, .preserve = FALSE)
 ## Value
 
 A `tbl_gpu` object with the selected rows.
+
+## Details
+
+### Row order
+
+As in dplyr: ungrouped, the rows come in the order of the positions.
+After
+[`group_by()`](https://dplyr.tidyverse.org/reference/group_by.html) the
+result comes group by group, in ascending group-key order (an `NA` key
+last), and each group's rows keep their order. With `.by` the groups
+come in the order each first appears in `.data`.

@@ -1,13 +1,13 @@
 # Select rows with the largest values of a variable
 
 Keeps the `n` (or `prop` fraction of) rows with the largest `order_by`
-values, similar to
-[`dplyr::slice_max()`](https://dplyr.tidyverse.org/reference/slice.html).
-See
+values, as
+[`dplyr::slice_max()`](https://dplyr.tidyverse.org/reference/slice.html)
+does. It works as
 [`slice_min.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/slice_min.tbl_gpu.md)
-for the shared native-vs-fallback dispatch and `order_by`/`with_ties`/
-`na_rm` semantics (identical, except the ranking direction and the
-result's row order, which is descending here).
+does (what runs on the GPU, `order_by`, `with_ties`, `na_rm`), except
+for the ranking direction and the result's row order, which is
+descending here.
 
 ## Usage
 
@@ -34,7 +34,7 @@ slice_max(
 
 - order_by:
 
-  Column (or IR-supported expression) to rank by.
+  Column, or expression of columns, to rank by.
 
 - ...:
 
@@ -47,10 +47,9 @@ slice_max(
 
 - by:
 
-  Optional on-the-fly grouping columns, GPU-native (Phase 5, task W7) –
-  see
+  Optional grouping columns for this call only, run on the GPU; see
   [`slice_head.tbl_gpu()`](https://bbtheo.github.io/cuplyr/reference/slice_head.tbl_gpu.md)'s
-  `by` docs.
+  `by`.
 
 - with_ties:
 

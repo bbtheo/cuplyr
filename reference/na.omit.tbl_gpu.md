@@ -4,10 +4,10 @@
 `tbl_gpu`: keeps the rows where no column is `NA` (`NaN` counts as
 missing, as in [`is.na()`](https://rdrr.io/r/base/NA.html); an
 [`addNA()`](https://rdrr.io/r/base/factor.html) factor level is a value,
-not a missing one). It is an ordinary native
-[`dplyr::filter()`](https://dplyr.tidyverse.org/reference/filter.html),
-so the table keeps its execution mode, grouping and attributes, and lazy
-stays lazy.
+not a missing one). It runs as a
+[`dplyr::filter()`](https://dplyr.tidyverse.org/reference/filter.html)
+on the GPU, so the table keeps its execution mode, grouping and
+attributes, and lazy stays lazy.
 
 ## Usage
 

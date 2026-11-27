@@ -1,4 +1,4 @@
-# Cast one join key column to its common type (A3)
+# Cast one join key column to its common type
 
 A factor key meeting a character key is decoded to its labels with
 `gpu_decode_factor()` – never `gpu_cast_column()`, which would only see

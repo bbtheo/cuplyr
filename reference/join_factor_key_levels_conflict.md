@@ -18,11 +18,8 @@ calls this right after
 and routes the WHOLE join to the CPU fallback when it's `TRUE`,
 mirroring
 [`join_output_would_collide()`](https://bbtheo.github.io/cuplyr/reference/join_output_would_collide.md)'s
-existing pattern (Phase 8 sets.R precedent:
-[`check_set_op_compatible()`](https://bbtheo.github.io/cuplyr/reference/check_set_op_compatible.md)
-uses the identical identical-levels-vs-not split to decide native vs.
-fallback). Both-factor-with-IDENTICAL-levels keys compare correctly
-natively (same code domain) and are not flagged here.
+existing pattern. Both-factor-with-IDENTICAL-levels keys compare
+correctly natively (same code domain) and are not flagged here.
 
 ## Usage
 

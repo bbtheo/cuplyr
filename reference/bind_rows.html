@@ -9,7 +9,7 @@ operations are performed on the GPU. For other objects, delegates to dplyr."><me
 
     <a class="navbar-brand me-2" href="../index.html">cuplyr</a>
 
-    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.1.1.9000</small>
+    <small class="nav-text text-muted me-auto" data-bs-toggle="tooltip" data-bs-placement="bottom" title="">0.2.0</small>
 
 
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar" aria-controls="navbar" aria-expanded="false" aria-label="Toggle navigation">
@@ -72,7 +72,12 @@ flattened as in <code><a href="https://dplyr.tidyverse.org/reference/bind_rows.h
     <div class="section level2">
     <h2 id="details">Details<a class="anchor" aria-label="anchor" href="#details"></a></h2>
     <p>If any input (including one inside a list) is a <code>tbl_gpu</code>, the result is a
-<code>tbl_gpu</code>, wherever the <code>tbl_gpu</code> sits in the arguments. <code><a href="https://dplyr.tidyverse.org/reference/bind_rows.html" class="external-link">dplyr::bind_rows()</a></code>
+<code>tbl_gpu</code>, wherever the <code>tbl_gpu</code> sits in the arguments. The exception is a
+data frame input with a list or data frame column, which has no GPU form:
+then dplyr binds the inputs on the CPU and the result is its data frame,
+with the first input's class and groups and the <code>.id</code> column. A matrix
+column with more than one column raises an error that names it.
+<code><a href="https://dplyr.tidyverse.org/reference/bind_rows.html" class="external-link">dplyr::bind_rows()</a></code>
 and <code><a href="https://purrr.tidyverse.org/reference/map_dfr.html" class="external-link">purrr::map_dfr()</a></code> on a <code>tbl_gpu</code> input are handed to this function and
 give the same result; <code><a href="https://vctrs.r-lib.org/reference/vec_bind.html" class="external-link">vctrs::vec_rbind()</a></code> and <code><a href="https://purrr.tidyverse.org/reference/list_c.html" class="external-link">purrr::list_rbind()</a></code> can't
 be intercepted and raise an error for a <code>tbl_gpu</code> (use

@@ -1,7 +1,7 @@
 # Get dimensions of a GPU table
 
 Returns the number of rows and columns in a GPU table. For a lazy table
-with pending operations the row count is that of the RESULT, so the plan
+with pending operations the row count is that of the result, so the plan
 is run on the GPU
 ([`compute()`](https://dplyr.tidyverse.org/reference/compute.html),
 nothing is copied to R and `x` itself is not changed).

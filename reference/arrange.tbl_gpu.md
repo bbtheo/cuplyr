@@ -1,10 +1,9 @@
-# Arrange rows of a GPU table by column values
+# Order rows using column values
 
-Orders the rows of a GPU table by the values of specified columns,
-similar to
-[`dplyr::arrange()`](https://dplyr.tidyverse.org/reference/arrange.html).
-Sorting is performed entirely on the GPU using a memory-efficient
-two-phase algorithm.
+[`arrange()`](https://dplyr.tidyverse.org/reference/arrange.html) orders
+the rows of a GPU table by the values of the columns you name, as
+[`dplyr::arrange()`](https://dplyr.tidyverse.org/reference/arrange.html)
+does. The sort runs on the GPU.
 
 ## Usage
 
@@ -22,46 +21,45 @@ arrange(.data, ..., .by_group = FALSE, .locale = NULL)
 
 - ...:
 
-  Column names or expressions to sort by. Use `desc(column)` or
-  `-column` for descending order. Multiple columns are sorted in order
-  of precedence (first column is primary sort key).
+  Columns to sort by. A bare column, `desc(column)`,
+  [`pick()`](https://dplyr.tidyverse.org/reference/pick.html) of
+  columns, and `-column` of a numeric or logical column sort on the GPU.
+  Any other expression, such as `arrange(x + y)` or `-column` of a
+  factor, string or date column (where R's `-` warns or errors), is
+  evaluated by dplyr on the CPU. The first key is the primary sort key,
+  the second breaks its ties, and so on.
 
 - .by_group:
 
-  If `TRUE` and `.data` is grouped, sort within groups by prepending
-  group columns to the sort specification. Default is `FALSE`.
+  If `TRUE` and `.data` is grouped, sort by the grouping columns first
+  (ascending), then by `...`. Default is `FALSE`.
 
 - .locale:
 
   The locale to sort character vectors in. `NULL` (the default) and
   `"C"` sort by byte order on the GPU; any other locale is sorted by
-  dplyr on the CPU (via stringi) through the usual fallback.
+  dplyr on the CPU (with stringi).
 
 ## Value
 
-A `tbl_gpu` object with rows reordered. The GPU memory for the sorted
-result is newly allocated (approximately 2x table size peak memory).
+A `tbl_gpu` with the rows reordered and the groups of `.data`. The
+sorted result is new GPU memory (about twice the table size at peak).
 
 ## Details
 
 ### Sort order
 
-- Default is ascending order
+- Ascending by default; `desc(column)` or `-column` sorts descending.
 
-- Use `desc(column)` or `-column` for descending order
+- With several keys, the first is the primary key, the second breaks its
+  ties, and so on.
 
-- Multiple columns: first column is primary key, second is tiebreaker,
-  etc.
+- The sort is stable: rows that tie keep their original order.
 
-- Sorting is stable: ties preserve their original relative order
+### Missing values
 
-### NA handling
-
-- `NA` values are always placed last, for both ascending order and
-  [`desc()`](https://dplyr.tidyverse.org/reference/desc.html)/descending
-  order, matching dplyr exactly (verified empirically against dplyr
-  1.2.1; fixed in Phase 6 – older versions of this package placed `NA`
-  first for descending sorts, a divergence from dplyr)
+`NA` and `NaN` sort last, in ascending and in descending order, as in
+dplyr.
 
 ### Memory usage
 
@@ -78,11 +76,13 @@ For very large tables, consider filtering to reduce size before sorting.
 
 ### Supported column types
 
-All column types supported by `tbl_gpu` can be sorted: numeric, integer,
-character, logical, Date, POSIXct.
+Every column type a GPU table holds can be a sort key: double, integer,
+integer64, character, logical, factor, `Date` and `POSIXct`. A factor
+sorts by the order of its levels, as in dplyr.
 
-Note: Character sorting on the GPU uses binary/UTF-8 ordering (dplyr's
-`"C"` locale). A non-`"C"` `.locale` falls back to dplyr.
+Character columns sort by byte (UTF-8) order, which is dplyr's default
+`"C"` locale. Another `.locale`, or
+`options(dplyr.legacy_locale = TRUE)`, sorts in dplyr on the CPU.
 
 ## See also
 

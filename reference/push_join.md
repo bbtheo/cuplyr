@@ -1,8 +1,8 @@
 # Apply a two-input join AST node, dispatching on exec_mode
 
 The join analogue of
-[`push_op()`](https://bbtheo.github.io/cuplyr/reference/push_op.md)
-(D1). Joins can't reuse
+[`push_op()`](https://bbtheo.github.io/cuplyr/reference/push_op.md).
+Joins can't reuse
 [`push_op()`](https://bbtheo.github.io/cuplyr/reference/push_op.md)
 as-is because it is built around a single `.data` input: it reads
 exactly one `exec_mode`/`ptr`/`schema` to decide the schedule. A join
@@ -73,8 +73,8 @@ A new `tbl_gpu`
 
 ## Details
 
-Groups (F06): every dplyr join ends with `dplyr_reconstruct(out, x)`, so
-for EVERY join type the result is grouped by
+Groups: every dplyr join ends with `dplyr_reconstruct(out, x)`, so for
+EVERY join type the result is grouped by
 `intersect(x$groups, names(out))` and keeps `x`'s `.drop` setting
 (`x$group_drop`); `y`'s grouping is irrelevant. A group column that gets
 suffixed away (a name collision, or the key under `keep = TRUE`) simply
