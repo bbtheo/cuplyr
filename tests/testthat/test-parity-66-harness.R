@@ -97,6 +97,7 @@ p66_run_vendored <- function(file, test, upload = TRUE, exclusions = NULL) {
 p66_excluded <- data.frame(
   file = c(
     "test-by.R", "test-by.R", "test-by.R",
+    "test-by.R", "test-by.R", "test-by.R",
     "test-join-rows.R",
     "test-join.R",
     "test-recode-values.R"
@@ -105,11 +106,17 @@ p66_excluded <- data.frame(
     "computes group data when `by` is set",
     "computes `by` group data in order of appearance",
     "extracts existing data when `by = NULL`",
+    # these three pass in the run only because a relaxed `error = TRUE`
+    # snapshot credits any error: compute_by() fails on the `[` of the
+    # tbl_gpu before it reaches dplyr's grouped/rowwise check
+    "can't set `.by` with a grouped-df",
+    "can't set `.by` with a rowwise-df",
+    "can tweak the error args",
     "missing values only match with `==`, `>=`, and `<=` conditions",
     "joins using `overlaps(bounds =)` work as expected (#6488)",
     "`NA` is considered unmatched unless handled explicitly"
   ),
-  item = c("C3", "C3", "C3", "C3", "C1", "C1"),
+  item = c("C3", "C3", "C3", "C3", "C3", "C3", "C3", "C1", "C1"),
   stringsAsFactors = FALSE
 )
 
@@ -185,6 +192,65 @@ test_that("prepending a class to an uploaded fixture keeps it a tbl_gpu", {
     expect_equal(row$raw_status, "pass", info = paste(t, row$message))
     expect_true(row$exercised, info = t)
   }
+})
+
+test_that("several classes, a second prepend and a no-op assignment round-trip", {
+  skip_if_no_gpu()
+  res <- p66_run("test-fake.R", c(
+    'test_that("several", {',
+    '  df <- tibble(x = 1:3)',
+    '  class(df) <- c("p66a", "p66b", class(df))',
+    '  expect_identical(base::class(df), c("p66a", "p66b", "tbl_gpu", "tbl"))',
+    '  expect_identical(class(df), c("p66a", "p66b", "tbl_df", "tbl", "data.frame"))',
+    '})',
+    'test_that("second prepend", {',
+    '  df <- tibble(x = 1:3)',
+    '  class(df) <- c("p66a", class(df))',
+    '  class(df) <- c("p66b", class(df))',
+    '  expect_identical(base::class(df), c("p66b", "p66a", "tbl_gpu", "tbl"))',
+    '  expect_identical(class(df), c("p66b", "p66a", "tbl_df", "tbl", "data.frame"))',
+    '})',
+    'test_that("no-op", {',
+    '  gdf <- tibble(x = 1:4, g = c(1, 1, 2, 2)) |> group_by(g)',
+    '  class(gdf) <- class(gdf)',
+    '  expect_identical(base::class(gdf), c("tbl_gpu", "tbl"))',
+    '  class(gdf) <- c("p66a", class(gdf))',
+    '  class(gdf) <- class(gdf)',
+    '  expect_identical(base::class(gdf), c("p66a", "tbl_gpu", "tbl"))',
+    '})'
+  ))
+  for (t in c("several", "second prepend", "no-op")) {
+    row <- p66_row(res, t)
+    expect_equal(row$raw_status, "pass", info = paste(t, row$message))
+    expect_true(row$exercised, info = t)
+  }
+})
+
+test_that("expect_s3_class() sees a prepended class, as class() does", {
+  skip_if_no_gpu()
+  res <- p66_run("test-fake.R", c(
+    'test_that("with subclass", {',
+    '  df <- tibble(x = 1:3)',
+    '  class(df) <- c("p66a", class(df))',
+    '  expect_s3_class(df, c("p66a", "tbl_df", "tbl", "data.frame"), exact = TRUE)',
+    '  expect_s3_class(df, "p66a")',
+    '})',
+    'test_that("subclass is not ignored", {',
+    '  df <- tibble(x = 1:3)',
+    '  class(df) <- c("p66a", class(df))',
+    '  expect_s3_class(df, c("tbl_df", "tbl", "data.frame"), exact = TRUE)',
+    '})',
+    'test_that("a verb result without the subclass", {',
+    '  df <- tibble(x = 1:3)',
+    '  class(df) <- c("p66a", class(df))',
+    '  out <- summarise(df, n = n())',
+    '  expect_s3_class(out, c("tbl_df", "tbl", "data.frame"), exact = TRUE)',
+    '})'
+  ))
+  expect_equal(p66_row(res, "with subclass")$raw_status, "pass", info = p66_row(res, "with subclass")$message)
+  expect_equal(p66_row(res, "subclass is not ignored")$raw_status, "fail")
+  expect_equal(p66_row(res, "a verb result without the subclass")$raw_status, "pass",
+               info = p66_row(res, "a verb result without the subclass")$message)
 })
 
 test_that("prepending a class to a grouped result keeps it a grouped tbl_gpu", {

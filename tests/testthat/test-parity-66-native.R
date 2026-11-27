@@ -51,10 +51,13 @@ test_that("group_data() of ungrouped, grouped and rowwise tables is dplyr's", {
 test_that("`.by` with a grouped or rowwise table errors as in dplyr", {
   skip_if_no_gpu()
   df <- tibble::tibble(x = 1:5)
-  expect_error(dplyr::summarise(dplyr::group_by(df, x), n = dplyr::n(), .by = x))
-  expect_error(dplyr::summarise(dplyr::group_by(tbl_gpu(df), x), n = dplyr::n(), .by = x))
-  expect_error(dplyr::summarise(dplyr::rowwise(df), n = dplyr::n(), .by = x))
-  expect_error(dplyr::summarise(dplyr::rowwise(tbl_gpu(df)), n = dplyr::n(), .by = x))
+  grouped <- "Can't supply `.by` when `.data` is a grouped data frame."
+  rowwise <- "Can't supply `.by` when `.data` is a rowwise data frame."
+  for (d in list(df, tbl_gpu(df), tbl_gpu(df, lazy = TRUE))) {
+    expect_error(dplyr::summarise(dplyr::group_by(d, x), n = dplyr::n(), .by = x), grouped, fixed = TRUE)
+    expect_error(dplyr::mutate(dplyr::group_by(d, x), n = dplyr::n(), .by = x), grouped, fixed = TRUE)
+    expect_error(dplyr::summarise(dplyr::rowwise(d), n = dplyr::n(), .by = x), rowwise, fixed = TRUE)
+  }
 })
 
 # ---------------------------------------------------------------------------
@@ -116,10 +119,8 @@ test_that("overlaps() with an NA bound and with zero rows", {
   df1 <- tibble::tibble(x_lower = c(1, NA, 3), x_upper = c(2, 3, NA))
   df2 <- tibble::tibble(y_lower = c(2, NA), y_upper = c(4, 5))
   by <- dplyr::join_by(overlaps(x_lower, x_upper, y_lower, y_upper))
-  p66_both(df1, function(d) dplyr::left_join(d, p66_y_like(d, df2), by = by),
-           arrange_by = c("x_lower", "x_upper", "y_lower", "y_upper"))
-  p66_both(df1[0, ], function(d) dplyr::full_join(d, p66_y_like(d, df2), by = by),
-           arrange_by = c("x_lower", "x_upper", "y_lower", "y_upper"))
+  p66_both(df1, function(d) dplyr::left_join(d, p66_y_like(d, df2), by = by))
+  p66_both(df1[0, ], function(d) dplyr::full_join(d, p66_y_like(d, df2), by = by))
 })
 
 # ---------------------------------------------------------------------------
