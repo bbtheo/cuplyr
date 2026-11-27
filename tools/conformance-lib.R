@@ -506,15 +506,15 @@ cf_normalize <- function(x) {
 cf_is_bare_df <- function(x) identical(class(x), "data.frame")
 
 # The collected tibble of a data.frame fixture, as the bare data.frame it came from.
+cf_as_bare <- function(x) {
+  if (identical(class(x), c("tbl_df", "tbl", "data.frame"))) as.data.frame(x) else x
+}
+
 # The classes a tbl_gpu carries in front of "tbl_gpu" (a test's
 # `class(x) <- c("sub", class(x))`, see `class<-` in cf_make_shim_env()).
 cf_extra_classes <- function(x) {
   own <- base::class(x)
   own[seq_len(match("tbl_gpu", own) - 1L)]
-}
-
-cf_as_bare <- function(x) {
-  if (identical(class(x), c("tbl_df", "tbl", "data.frame"))) as.data.frame(x) else x
 }
 
 # Normalize both operands of a comparison. The only relaxation: when exactly
