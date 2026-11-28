@@ -259,6 +259,9 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
     # quosure's `k`, see the splice rule after pronoun_call_name(), R/ir.R)
     # (its error names an unnamed dot as the user wrote it)
     unnamed <- !is_named[is_comp] & !unbound_ref[is_comp]
+    if (expr_has_minmax_na_rm(comp_dots)) {
+      return(group_by_fallback("a min()/max() with na.rm in a computed key warns in dplyr's own verb."))
+    }
     working <- withCallingHandlers(
       dplyr::mutate(dplyr::ungroup(working), !!!comp_dots),
       `dplyr:::mutate_error` = function(cnd) group_by_mutate_error(cnd, comp_dots, unnamed)

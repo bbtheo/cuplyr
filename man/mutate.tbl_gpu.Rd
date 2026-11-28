@@ -225,8 +225,11 @@ drops \code{NA} and \code{NaN} (a group with none left is \code{NaN}), and so
 does \code{min()}/\code{max(x, na.rm = TRUE)} of a double (a group with none
 left is \code{Inf}/\code{-Inf}, with dplyr's warning); \code{min()}/\code{max(x, na.rm = TRUE)} of an integer or logical runs on the CPU, because
 dplyr makes the whole column a double when some group has no value
-left. \code{median()}, \code{sd()} and \code{var()} with \code{na.rm = TRUE} run on the
-CPU. \code{median()} runs on the GPU for a double, \code{Date} or
+left. In \code{filter()} a \code{min()}/\code{max(x, na.rm = TRUE)} runs on the
+CPU, so that dplyr names the predicate in its warning. \code{sd()} and
+\code{var()} with \code{na.rm = TRUE} run on the CPU, and so does \code{median()}
+of a number (a \code{Date} or \code{POSIXct} one is on the GPU). \code{median()}
+runs on the GPU for a double, \code{Date} or
 \code{POSIXct} column (of an integer or logical one, on the CPU), and
 \code{min()}/\code{max()} of a string column under the collation rule of the
 comparisons above. On the GPU, \code{mean()} and \code{median()} of a \code{Date}

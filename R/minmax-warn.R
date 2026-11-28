@@ -1019,10 +1019,22 @@ lower_window_narm_warn <- function(narm, input_ptr, input_schema, groups) {
   }
   calls <- narm$calls
   pair <- vapply(calls, function(cl) paste(cl$op, cl$value_col, sep = "\r"), character(1))
+  # A group has no value left only when its column holds a NA or NaN, and the
+  # sum of the whole column is NA or NaN then: one reduction settles the common
+  # case (an Inf - Inf sum takes the grouped pass below, which is exact)
+  value_idx <- match(unique(vapply(calls, `[[`, character(1), "value_col")), input_schema$names) - 1L
+  total <- gpu_summarise(
+    input_ptr, integer(), value_idx, rep("sum", length(value_idx)),
+    rep(FALSE, length(value_idx)), rep(NA_real_, length(value_idx)), rep(FALSE, length(value_idx)),
+    "keys"
+  )
+  if (!anyNA(unlist(gpu_collect(total, paste0("v", seq_along(value_idx))), use.names = FALSE))) {
+    return(invisible())
+  }
   uniq <- unique(pair)
   first <- match(uniq, pair)
   k <- length(uniq)
-  group_idx <- if (length(groups) > 0L) match(groups, input_schema$names) - 1L else integer()
+  group_idx <-if (length(groups) > 0L) match(groups, input_schema$names) - 1L else integer()
   res <- gpu_summarise(
     input_ptr, group_idx,
     match(vapply(calls[first], `[[`, character(1), "value_col"), input_schema$names) - 1L,

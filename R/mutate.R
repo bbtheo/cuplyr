@@ -204,8 +204,11 @@
 #'         left is `Inf`/`-Inf`, with dplyr's warning); `min()`/`max(x,
 #'         na.rm = TRUE)` of an integer or logical runs on the CPU, because
 #'         dplyr makes the whole column a double when some group has no value
-#'         left. `median()`, `sd()` and `var()` with `na.rm = TRUE` run on the
-#'         CPU. `median()` runs on the GPU for a double, `Date` or
+#'         left. In `filter()` a `min()`/`max(x, na.rm = TRUE)` runs on the
+#'         CPU, so that dplyr names the predicate in its warning. `sd()` and
+#'         `var()` with `na.rm = TRUE` run on the CPU, and so does `median()`
+#'         of a number (a `Date` or `POSIXct` one is on the GPU). `median()`
+#'         runs on the GPU for a double, `Date` or
 #'         `POSIXct` column (of an integer or logical one, on the CPU), and
 #'         `min()`/`max()` of a string column under the collation rule of the
 #'         comparisons above. On the GPU, `mean()` and `median()` of a `Date`

@@ -167,6 +167,10 @@ resolve_grouping_dots <- function(.data, dots, call = rlang::caller_env(),
   if (any_window) {
     # As distinct(): a window or aggregate key is computed by mutate() over
     # the whole table, grouped or not (#29)
+    if (expr_has_minmax_na_rm(dots[computed])) {
+      fallback_dot_failed(NA_integer_, "a min()/max() with na.rm in a grouping key warns in dplyr's own verb.")
+      return(NULL)
+    }
     result <- mutate_keys_ungrouped(.data, dots[computed], notice_verb)
     if (is.null(result)) {
       fallback_dot_failed(NA_integer_, "the computed grouping columns could not be built on the GPU.")
@@ -178,6 +182,37 @@ resolve_grouping_dots <- function(.data, dots, call = rlang::caller_env(),
   result <- regroup_for_keys(result, names_out)
 
   list(data = result, names = unique(names_out))
+}
+
+# (#74) Does any of the quosures (or one expression) call min()/max() with a
+# `na.rm` argument anywhere? For a group with no value left base R warns, and
+# dplyr's warning names the verb that evaluates the call (`distinct()`,
+# `add_count()`, `group_by()`): a call to min()/max(na.rm = ) in a key or in
+# `wt` is that verb's to run whole when the GPU's own plan can't say so.
+# @keywords internal
+expr_has_minmax_na_rm <- function(x) {
+  if (rlang::is_missing(x)) {
+    return(FALSE)
+  }
+  if (rlang::is_quosure(x)) {
+    x <- rlang::quo_get_expr(x)
+  }
+  if (is.list(x) && !is.call(x)) {
+    return(any(vapply(x, expr_has_minmax_na_rm, logical(1))))
+  }
+  if (!is.call(x)) {
+    return(FALSE)
+  }
+  head <- call_head_name(x)
+  if (!is.null(head) && head %in% c("min", "max") && "na.rm" %in% names(x)) {
+    return(TRUE)
+  }
+  for (i in seq_along(x)[-1L]) {
+    if (expr_has_minmax_na_rm(x[[i]])) {
+      return(TRUE)
+    }
+  }
+  FALSE
 }
 
 # Compute the computed grouping keys `comp_dots` (a named list of quosures) of
@@ -570,6 +605,13 @@ add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .dro
   }
   working <- resolved$data
   dot_names <- resolved$names
+
+  # (#74) its mutate() would name itself in the warning of a min()/max(na.rm =) in `wt`
+  if (expr_has_minmax_na_rm(wt_quo)) {
+    return(gpu_fallback("add_count", x, function(tbl) {
+      dplyr::add_count(tbl, !!!dots, wt = !!wt_quo, sort = sort, name = name)
+    }, reason = "a min()/max() with na.rm in `wt` warns in dplyr's own verb."))
+  }
 
   grouped <- if (length(dot_names) > 0) {
     dplyr::group_by(working, !!!rlang::syms(dot_names), .add = TRUE)

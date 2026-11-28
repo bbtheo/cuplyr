@@ -1,7 +1,8 @@
 # cuplyr (development version)
 
-* `mean(x, na.rm = TRUE)` and `min()`/`max(x, na.rm = TRUE)` of a double in
-  `mutate()` and `filter()`, `row_number(x)` and `ntile(x, n)` inside
+* `mean(x, na.rm = TRUE)` of a logical, integer or double in `mutate()` and
+  `filter()`, `min()`/`max(x, na.rm = TRUE)` of a double in `mutate()`
+  (`filter()` leaves that one to dplyr), `row_number(x)` and `ntile(x, n)` inside
   `order_by()`/`with_order()`, integer64 `%in%`, `first()`/`last()`/`nth()`,
   `n_distinct()`, `percent_rank()`, `cume_dist()` and `lag()`/`lead()` with a
   non-`NA` `default`, and a type-based `across(where(...))` after `n()`,

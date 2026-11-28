@@ -4863,6 +4863,25 @@ ir_has_window <- function(ir) {
   FALSE
 }
 
+# (#74) Does an IR (sub)tree hold a `min()`/`max()` with `na.rm = TRUE` (ir_parse_minmax_na_rm_call())?
+# Over a group with no value left dplyr's call warns, and only mutate() plans that
+# warning: a verb that can't (summarise(), reframe(), count()) leaves the call to dplyr.
+# @keywords internal
+ir_has_narm_minmax <- function(ir) {
+  if (!inherits(ir, "cuplyr_ir") || !identical(.subset2(ir, "kind"), "call")) {
+    return(FALSE)
+  }
+  if (isTRUE(.subset2(.subset2(ir, "meta"), "na_rm")) && .subset2(ir, "op") %in% c("min", "max")) {
+    return(TRUE)
+  }
+  for (arg in .subset2(ir, "args")) {
+    if (ir_has_narm_minmax(arg)) {
+      return(TRUE)
+    }
+  }
+  FALSE
+}
+
 #' Bind 0-based column indices onto every `col` node in an IR tree
 #'
 #' Indices are resolved against a schema only

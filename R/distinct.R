@@ -200,6 +200,12 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
     # A window or aggregate key needs mutate()'s window planning, which a
     # hand-built ast_mutate lacks. dplyr evaluates the keys over the whole
     # table even when it is grouped (#29).
+    if (expr_has_minmax_na_rm(dots[computed])) {
+      return(distinct_fallback(
+        .data, orig_dots, .keep_all,
+        reason = "a min()/max() with na.rm in a key warns in dplyr's own verb."
+      ))
+    }
     keyed <- mutate_keys_ungrouped(.data, dots[computed], "distinct")
     if (is.null(keyed)) {
       return(distinct_fallback(

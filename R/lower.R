@@ -1207,7 +1207,8 @@ lower_window <- function(ast, source_ptr) {
   # gpu_window() assembles the output purely from each spec's own
   # out_pos -- but keeps `show_query()`/debugging output deterministic).
   frame_keys <- vapply(specs, function(s) {
-    paste(c(s$order_cols, ifelse(s$order_desc, "D", "A")), collapse = "")
+    # (a separator no column name holds, so `a`,`bA` and `ab`,`A` differ)
+    paste(c(s$order_cols, ifelse(s$order_desc, "D", "A")), collapse = "\001")
   }, character(1))
   uniq_keys <- unique(frame_keys)
 

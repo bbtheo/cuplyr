@@ -1362,6 +1362,11 @@ summarise_dots_parseable <- function(dots, schema, ir_cache = NULL) {
     if (ir_agg_arg_is_scalar_reduction(ir)) {
       return(no(i, "a reducer of a one-value argument (`sum(mean(x))`, `sum(n())`) is evaluated per group by dplyr."))
     }
+    # (#74) a min()/max() with na.rm = TRUE warns for a group with no value left,
+    # naming this dot; the window plan doesn't carry that warning: dplyr's call
+    if (ir_has_narm_minmax(ir)) {
+      return(no(i, fn_says(decomposed$fn_name, "of an expression with a min()/max() with na.rm = TRUE is evaluated per group by dplyr, which warns for a group with no value left.")))
+    }
     if (ir_has_window(ir)) {
       next  # windows-inside-summarise: always valid (Phase 6, task 4)
     }
