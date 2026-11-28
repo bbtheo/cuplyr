@@ -1,4 +1,4 @@
-# #146: calls to deprecated libcudf/RMM APIs fail a check.
+# #146: calls to deprecated declarations (libcudf, RMM or any other non-system header) fail a check.
 #
 # The ordinary build never fails on a deprecation (a new RAPIDS release must
 # not break an install). The opt-in switch CUPLYR_WERROR_DEPRECATED=1, read by
@@ -225,7 +225,12 @@ test_that("#146: cuplyr's sources never silence a deprecation", {
       "-Wno-deprecated", "-Wno-error", "IGNORE_DEPRECATED", "DISABLE_DEPRECATION",
       "_SILENCE_[A-Z_]*DEPRECAT",
       "pragma\\s+GCC\\s+system_header",    # silences every diagnostic below it
-      "(^|[\\s=\"'])-w([\\s\"']|$)"),        # drops all warnings
+      "(^|[\\s=\"'])-w([\\s\"']|$)",         # drops all warnings
+      # CCCL's and libcudf's own wrappers around the same pragma
+      # (_CCCL_SUPPRESS_DEPRECATED_PUSH, _CCCL_DIAG_SUPPRESS_GCC("-W..."), ...)
+      # and any other string literal naming a deprecation warning.
+      "SUPPRESS_DEPRECATED|DIAG_SUPPRESS",
+      '\\\\?"-W(no-)?(error=)?deprecated'),
     collapse = "|"
   )
   hits <- unlist(lapply(files, function(f) {
