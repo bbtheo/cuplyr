@@ -37,20 +37,20 @@ table also runs its plan, but keeps nothing; \code{compute()} first if you want 
 look at the result repeatedly.
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  # Lazy pipeline
-  lazy_result <- tbl_gpu(mtcars) |>  # lazy by default
-    filter(mpg > 20) |>
-    mutate(kpl = mpg * 0.425)
+# Lazy pipeline
+lazy_result <- tbl_gpu(mtcars) |>  # lazy by default
+  filter(mpg > 20) |>
+  mutate(kpl = mpg * 0.425)
 
-  # Force execution, keep on GPU
-  gpu_result <- lazy_result |> compute()
+# Force execution, keep on GPU
+gpu_result <- lazy_result |> compute()
 
-  # Now branch into two different analyses
-  analysis1 <- gpu_result |> filter(cyl == 4) |> collect()
-  analysis2 <- gpu_result |> filter(cyl == 6) |> collect()
-}
+# Now branch into two different analyses
+analysis1 <- gpu_result |> filter(cyl == 4) |> collect()
+analysis2 <- gpu_result |> filter(cyl == 6) |> collect()
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link{collect.tbl_gpu}} to bring data back to R,

@@ -68,14 +68,14 @@ It is not meant for the loop of a benchmark: under \code{"async"} the trim makes
 the next call grow the pool again.
 }
 \examples{
-if (has_gpu()) {
-  # Create and discard a GPU table
-  gpu_df <- tbl_gpu(data.frame(x = runif(1000000)))
-  rm(gpu_df)
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
+# Create and discard a GPU table
+gpu_df <- tbl_gpu(data.frame(x = runif(1000000)))
+rm(gpu_df)
 
-  # Force cleanup
-  gpu_gc(verbose = TRUE)
-}
+# Force cleanup
+gpu_gc(verbose = TRUE)
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link{gpu_memory_state}} for checking current memory usage

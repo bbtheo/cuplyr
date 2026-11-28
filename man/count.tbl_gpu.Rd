@@ -52,12 +52,12 @@ a table with fixed group keys (after \code{filter()}, \code{semi_join()}, ... on
 R to add the empty groups.
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  gpu_mtcars <- tbl_gpu(mtcars)
-  gpu_mtcars |> count(cyl) |> collect()
-  gpu_mtcars |> count(cyl, sort = TRUE) |> collect()
-}
+gpu_mtcars <- tbl_gpu(mtcars)
+gpu_mtcars |> count(cyl) |> collect()
+gpu_mtcars |> count(cyl, sort = TRUE) |> collect()
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link{tally.tbl_gpu}}, \code{\link{group_by.tbl_gpu}},

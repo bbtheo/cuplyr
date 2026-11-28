@@ -16,6 +16,16 @@
 #'   \item Device is accessible (not in exclusive mode by another process)
 #' }
 #'
+#' ## Testing switch
+#' Setting the environment variable `CUPLYR_DISABLE_GPU` to `"true"` or `"1"`
+#' (case-insensitive) makes `has_gpu()` return `FALSE` without asking the
+#' device, makes [gpu_details()] and [show_gpu()] report no GPU, and makes
+#' loading cuplyr skip the device query and the memory resource set-up. Any
+#' other value, or leaving it unset, leaves the check on. The variable is read
+#' on every call. It exists to test code, examples and vignettes as they run
+#' where no GPU is present; it changes only what cuplyr reports, so GPU code
+#' that you call directly still runs.
+#'
 #' @seealso
 #' \code{\link{gpu_details}} for detailed GPU information,
 #' \code{\link{show_gpu}} for formatted GPU info display
@@ -29,7 +39,17 @@
 #'   message("No GPU found, using CPU")
 #' }
 has_gpu <- function() {
+  if (gpu_disabled()) {
+    return(FALSE)
+  }
   tryCatch(gpu_is_available(), error = function(e) FALSE)
+}
+
+# TRUE when the CUPLYR_DISABLE_GPU testing switch is on ("true" or "1", any
+# case). Read on every call and never cached, so a switch set after the package
+# loaded is honoured; has_gpu(), gpu_details(), .onLoad and .onAttach all ask it.
+gpu_disabled <- function() {
+  tolower(Sys.getenv("CUPLYR_DISABLE_GPU", "")) %in% c("true", "1")
 }
 
 #' Get detailed GPU information
@@ -50,6 +70,8 @@ has_gpu <- function() {
 #' }
 #'
 #' If no GPU is available, returns `list(available = FALSE, device_count = 0)`.
+#' The same happens when the `CUPLYR_DISABLE_GPU` testing switch is on, see
+#' [has_gpu()].
 #'
 #' @details
 #' ## Compute capability
@@ -82,6 +104,9 @@ has_gpu <- function() {
 #'   cat("Compute:", info$compute_capability, "\n")
 #' }
 gpu_details <- function() {
+  if (gpu_disabled()) {
+    return(list(available = FALSE, device_count = 0L))
+  }
   tryCatch(gpu_info(), error = function(e) list(available = FALSE))
 }
 

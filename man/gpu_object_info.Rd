@@ -35,13 +35,13 @@ other tables are counted for each table, so estimates of related tables
 overlap.
 }
 \examples{
-if (has_gpu()) {
-  gpu_mtcars <- tbl_gpu(mtcars)
-  info <- gpu_object_info(gpu_mtcars)
-  cat("Rows:", info$nrow, "\n")
-  cat("GPU memory:", round(info$estimated_gpu_mb, 2), "MB\n")
-  cat("Data on GPU:", info$data_on_gpu, "\n")
-}
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
+gpu_mtcars <- tbl_gpu(mtcars)
+info <- gpu_object_info(gpu_mtcars)
+cat("Rows:", info$nrow, "\n")
+cat("GPU memory:", round(info$estimated_gpu_mb, 2), "MB\n")
+cat("Data on GPU:", info$data_on_gpu, "\n")
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link{gpu_memory_usage}} for just the memory estimate,

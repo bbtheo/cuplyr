@@ -36,12 +36,10 @@
 #' \code{\link{gpu_object_info}} for detailed object information
 #'
 #' @export
-#' @examples
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
-#'   size <- gpu_memory_usage(gpu_mtcars)
-#'   cat("Estimated GPU memory:", round(size / 1024, 1), "KB\n")
-#' }
+#' @examplesIf has_gpu()
+#' gpu_mtcars <- tbl_gpu(mtcars)
+#' size <- gpu_memory_usage(gpu_mtcars)
+#' cat("Estimated GPU memory:", round(size / 1024, 1), "KB\n")
 gpu_memory_usage <- function(x) {
   if (!is_tbl_gpu(x) || is.null(x$ptr)) {
     return(NA_real_)
@@ -99,14 +97,12 @@ gpu_memory_usage <- function(x) {
 #' \code{\link{verify_gpu_data}} to check if data is on GPU
 #'
 #' @export
-#' @examples
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
-#'   info <- gpu_object_info(gpu_mtcars)
-#'   cat("Rows:", info$nrow, "\n")
-#'   cat("GPU memory:", round(info$estimated_gpu_mb, 2), "MB\n")
-#'   cat("Data on GPU:", info$data_on_gpu, "\n")
-#' }
+#' @examplesIf has_gpu()
+#' gpu_mtcars <- tbl_gpu(mtcars)
+#' info <- gpu_object_info(gpu_mtcars)
+#' cat("Rows:", info$nrow, "\n")
+#' cat("GPU memory:", round(info$estimated_gpu_mb, 2), "MB\n")
+#' cat("Data on GPU:", info$data_on_gpu, "\n")
 gpu_object_info <- function(x) {
   result <- list(
     valid = FALSE,
@@ -174,16 +170,14 @@ gpu_object_info <- function(x) {
 #' \code{\link{tbl_gpu}} for creating GPU tables
 #'
 #' @export
-#' @examples
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
+#' @examplesIf has_gpu()
+#' gpu_mtcars <- tbl_gpu(mtcars)
 #'
-#'   # Should return TRUE
-#'   verify_gpu_data(gpu_mtcars)
+#' # Should return TRUE
+#' verify_gpu_data(gpu_mtcars)
 #'
-#'   # Regular data frames return FALSE
-#'   verify_gpu_data(mtcars)
-#' }
+#' # Regular data frames return FALSE
+#' verify_gpu_data(mtcars)
 verify_gpu_data <- function(x) {
   # Check 1: Must be tbl_gpu
   if (!is_tbl_gpu(x)) {
@@ -237,17 +231,15 @@ verify_gpu_data <- function(x) {
 #' \code{\link{gpu_object_info}} for detailed information
 #'
 #' @export
-#' @examples
-#' if (has_gpu()) {
-#'   # Create a larger dataset
-#'   df <- data.frame(matrix(runif(10000), ncol = 10))
-#'   gpu_df <- tbl_gpu(df)
+#' @examplesIf has_gpu()
+#' # Create a larger dataset
+#' df <- data.frame(matrix(runif(10000), ncol = 10))
+#' gpu_df <- tbl_gpu(df)
 #'
-#'   comparison <- gpu_size_comparison(gpu_df)
-#'   cat("R object:", round(comparison$r_bytes / 1024, 1), "KB\n")
-#'   cat("GPU data:", round(comparison$gpu_bytes / 1024, 1), "KB\n")
-#'   cat("Ratio:", round(comparison$ratio, 1), "x\n")
-#' }
+#' comparison <- gpu_size_comparison(gpu_df)
+#' cat("R object:", round(comparison$r_bytes / 1024, 1), "KB\n")
+#' cat("GPU data:", round(comparison$gpu_bytes / 1024, 1), "KB\n")
+#' cat("Ratio:", round(comparison$ratio, 1), "x\n")
 gpu_size_comparison <- function(x) {
   r_bytes <- as.numeric(utils::object.size(x))
   gpu_bytes <- gpu_memory_usage(x)
@@ -380,21 +372,19 @@ gpu_size_comparison <- function(x) {
 #' [cuplyr-options] for the options
 #'
 #' @export
-#' @examples
-#' if (has_gpu()) {
-#'   # Check memory before allocation
-#'   before <- gpu_memory_state()
+#' @examplesIf has_gpu()
+#' # Check memory before allocation
+#' before <- gpu_memory_state()
 #'
-#'   # Allocate some GPU data
-#'   gpu_df <- tbl_gpu(data.frame(x = runif(1000000)))
+#' # Allocate some GPU data
+#' gpu_df <- tbl_gpu(data.frame(x = runif(1000000)))
 #'
-#'   # Check memory after allocation
-#'   after <- gpu_memory_state()
+#' # Check memory after allocation
+#' after <- gpu_memory_state()
 #'
-#'   cat("Memory used:", after$used_gb - before$used_gb, "GB\n")
-#'   cat("Allocated from the resource:",
-#'       after$pool_used_bytes - before$pool_used_bytes, "bytes\n")
-#' }
+#' cat("Memory used:", after$used_gb - before$used_gb, "GB\n")
+#' cat("Allocated from the resource:",
+#'     after$pool_used_bytes - before$pool_used_bytes, "bytes\n")
 gpu_memory_state <- function() {
   # (only the memory figures: gpu_details() also reads the device properties,
   # which costs most of a millisecond, and a join calls this on every verb)
@@ -587,15 +577,13 @@ memory_resource_install <- function() {
 #' @return `NULL`, invisibly.
 #'
 #' @export
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   g <- tbl_gpu(data.frame(x = runif(1e6)), lazy = FALSE)
-#'   t0 <- Sys.time()
-#'   r <- dplyr::mutate(g, y = cumsum(x))
-#'   gpu_sync()
-#'   Sys.time() - t0
-#' }
+#' g <- tbl_gpu(data.frame(x = runif(1e6)), lazy = FALSE)
+#' t0 <- Sys.time()
+#' r <- dplyr::mutate(g, y = cumsum(x))
+#' gpu_sync()
+#' Sys.time() - t0
 gpu_sync <- function() {
   gpu_sync_device()
   invisible(NULL)
@@ -664,15 +652,13 @@ gpu_sync <- function() {
 #' \code{\link{gpu_memory_state}} for checking current memory usage
 #'
 #' @export
-#' @examples
-#' if (has_gpu()) {
-#'   # Create and discard a GPU table
-#'   gpu_df <- tbl_gpu(data.frame(x = runif(1000000)))
-#'   rm(gpu_df)
+#' @examplesIf has_gpu()
+#' # Create and discard a GPU table
+#' gpu_df <- tbl_gpu(data.frame(x = runif(1000000)))
+#' rm(gpu_df)
 #'
-#'   # Force cleanup
-#'   gpu_gc(verbose = TRUE)
-#' }
+#' # Force cleanup
+#' gpu_gc(verbose = TRUE)
 gpu_gc <- function(verbose = FALSE, aggressive = TRUE) {
   before <- gpu_memory_state()
 

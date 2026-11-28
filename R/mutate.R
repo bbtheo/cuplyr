@@ -330,33 +330,31 @@
 #' @export
 #' @importFrom dplyr mutate
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
+#' gpu_mtcars <- tbl_gpu(mtcars)
 #'
-#'   # Add a new column
-#'   result <- gpu_mtcars |>
-#'     mutate(kpl = mpg * 0.425) |>
-#'     collect()
+#' # Add a new column
+#' result <- gpu_mtcars |>
+#'   mutate(kpl = mpg * 0.425) |>
+#'   collect()
 #'
-#'   # Modify an existing column
-#'   adjusted <- gpu_mtcars |>
-#'     mutate(mpg = mpg + 5) |>
-#'     collect()
+#' # Modify an existing column
+#' adjusted <- gpu_mtcars |>
+#'   mutate(mpg = mpg + 5) |>
+#'   collect()
 #'
-#'   # Combine two columns
-#'   gpu_cars <- tbl_gpu(cars)
-#'   result <- gpu_cars |>
-#'     mutate(ratio = dist / speed) |>
-#'     collect()
+#' # Combine two columns
+#' gpu_cars <- tbl_gpu(cars)
+#' result <- gpu_cars |>
+#'   mutate(ratio = dist / speed) |>
+#'   collect()
 #'
-#'   # Chain multiple mutations
-#'   result <- gpu_mtcars |>
-#'     mutate(power_weight = hp / wt) |>
-#'     mutate(efficiency = mpg * power_weight) |>
-#'     collect()
-#' }
+#' # Chain multiple mutations
+#' result <- gpu_mtcars |>
+#'   mutate(power_weight = hp / wt) |>
+#'   mutate(efficiency = mpg * power_weight) |>
+#'   collect()
 mutate.tbl_gpu <- function(.data, ..., .by = NULL,
                            .keep = c("all", "used", "unused", "none"),
                            .before = NULL, .after = NULL) {
@@ -2172,15 +2170,13 @@ check_transmute_dots <- function(..., .keep, .before, .after, error_call = rlang
 #' @export
 #' @importFrom dplyr transmute
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
+#' gpu_mtcars <- tbl_gpu(mtcars)
 #'
-#'   result <- gpu_mtcars |>
-#'     transmute(kpl = mpg * 0.425, cyl) |>
-#'     collect()
-#' }
+#' result <- gpu_mtcars |>
+#'   transmute(kpl = mpg * 0.425, cyl) |>
+#'   collect()
 transmute.tbl_gpu <- function(.data, ...) {
   check_transmute_dots(...)
   p <- sys.parent()

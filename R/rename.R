@@ -64,15 +64,13 @@ check_rename_unique <- function(names) {
 #' @export
 #' @importFrom dplyr rename
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
+#' gpu_mtcars <- tbl_gpu(mtcars)
 #'
-#'   result <- gpu_mtcars |>
-#'     rename(miles_per_gallon = mpg) |>
-#'     collect()
-#' }
+#' result <- gpu_mtcars |>
+#'   rename(miles_per_gallon = mpg) |>
+#'   collect()
 rename.tbl_gpu <- function(.data, ...) {
   schema <- current_schema(.data)
 
@@ -130,15 +128,13 @@ rename_positions <- function(names, loc) {
 #' @export
 #' @importFrom dplyr rename_with
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
+#' gpu_mtcars <- tbl_gpu(mtcars)
 #'
-#'   result <- gpu_mtcars |>
-#'     rename_with(toupper) |>
-#'     collect()
-#' }
+#' result <- gpu_mtcars |>
+#'   rename_with(toupper) |>
+#'   collect()
 rename_with.tbl_gpu <- function(.data, .fn, .cols = dplyr::everything(), ...) {
   cols_quo <- rlang::enquo(.cols)
   fn <- rlang::as_function(.fn)

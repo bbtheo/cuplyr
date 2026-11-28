@@ -43,15 +43,13 @@
 #' @export
 #' @importFrom dplyr relocate
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
+#' gpu_mtcars <- tbl_gpu(mtcars)
 #'
-#'   result <- gpu_mtcars |>
-#'     relocate(hp, .after = mpg) |>
-#'     collect()
-#' }
+#' result <- gpu_mtcars |>
+#'   relocate(hp, .after = mpg) |>
+#'   collect()
 relocate.tbl_gpu <- function(.data, ..., .before = NULL, .after = NULL) {
   before_quo <- rlang::enquo(.before)
   after_quo <- rlang::enquo(.after)

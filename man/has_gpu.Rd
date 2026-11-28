@@ -23,6 +23,17 @@ This function checks:
 \item At least one CUDA device is present
 \item Device is accessible (not in exclusive mode by another process)
 }
+\subsection{Testing switch}{
+
+Setting the environment variable \code{CUPLYR_DISABLE_GPU} to \code{"true"} or \code{"1"}
+(case-insensitive) makes \code{has_gpu()} return \code{FALSE} without asking the
+device, makes \code{\link[=gpu_details]{gpu_details()}} and \code{\link[=show_gpu]{show_gpu()}} report no GPU, and makes
+loading cuplyr skip the device query and the memory resource set-up. Any
+other value, or leaving it unset, leaves the check on. The variable is read
+on every call. It exists to test code, examples and vignettes as they run
+where no GPU is present; it changes only what cuplyr reports, so GPU code
+that you call directly still runs.
+}
 }
 \examples{
 if (has_gpu()) {

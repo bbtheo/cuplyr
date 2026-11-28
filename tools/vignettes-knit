@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Re-knit the shipped vignettes from their sources, on the GPU:
+#   tools/vignettes-knit              # every vignettes/*.Rmd.orig
+#   tools/vignettes-knit memory       # just vignettes/memory.Rmd.orig
+# vignettes/<name>.Rmd ships precomputed (the output of the code is in the
+# file), so run this and commit the .Rmd files whenever a source changes or the
+# output they show is out of date. Nothing is written if a vignette fails.
+source "$(dirname "$0")/lib.sh"
+cd "$CUPLYR_WT_ROOT"
+names="c($(printf '"%s",' "$@" | sed 's/,$//'))"
+[[ $# -eq 0 ]] && names="NULL"
+exec "$(dirname "$0")/gpu-run" --label vignettes-knit -- Rscript -e "source('tools/ensure-optimized.R'); cuplyr_ensure_optimized_dll('.'); pkgload::load_all(quiet = TRUE, debug = FALSE); source('tools/vignettes-lib.R'); cuplyr_knit_vignettes('vignettes', $names)"

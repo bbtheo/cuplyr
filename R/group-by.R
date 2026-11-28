@@ -86,29 +86,27 @@
 #' @export
 #' @importFrom dplyr group_by
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
+#' gpu_mtcars <- tbl_gpu(mtcars)
 #'
-#'   # Group by a single column
-#'   by_cyl <- gpu_mtcars |>
-#'     group_by(cyl)
+#' # Group by a single column
+#' by_cyl <- gpu_mtcars |>
+#'   group_by(cyl)
 #'
-#'   # Group by multiple columns
-#'   by_cyl_gear <- gpu_mtcars |>
-#'     group_by(cyl, gear)
+#' # Group by multiple columns
+#' by_cyl_gear <- gpu_mtcars |>
+#'   group_by(cyl, gear)
 #'
-#'   # Computed group column
-#'   by_half_cyl <- gpu_mtcars |>
-#'     group_by(half_cyl = cyl %/% 2)
+#' # Computed group column
+#' by_half_cyl <- gpu_mtcars |>
+#'   group_by(half_cyl = cyl %/% 2)
 #'
-#'   # Use with summarise for aggregation
-#'   result <- gpu_mtcars |>
-#'     group_by(cyl) |>
-#'     summarise(mean_mpg = mean(mpg)) |>
-#'     collect()
-#' }
+#' # Use with summarise for aggregation
+#' result <- gpu_mtcars |>
+#'   group_by(cyl) |>
+#'   summarise(mean_mpg = mean(mpg)) |>
+#'   collect()
 group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
                              .drop = dplyr::group_by_drop_default(.data)) {
   check_group_by_dots(..., .add = .add, error_call = NULL)
@@ -398,21 +396,19 @@ check_regroup_dots <- function(..., .add) {
 #' @export
 #' @importFrom dplyr ungroup
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
+#' gpu_mtcars <- tbl_gpu(mtcars)
 #'
-#'   grouped <- gpu_mtcars |>
-#'     group_by(cyl)
+#' grouped <- gpu_mtcars |>
+#'   group_by(cyl)
 #'
-#'   # Remove grouping
-#'   ungrouped <- grouped |>
-#'     ungroup()
+#' # Remove grouping
+#' ungrouped <- grouped |>
+#'   ungroup()
 #'
-#'   # Verify groups are removed
-#'   length(group_vars(ungrouped))  # 0
-#' }
+#' # Verify groups are removed
+#' length(group_vars(ungrouped))  # 0
 ungroup.tbl_gpu <- function(x, ...) {
   groups <- .subset2(x, "groups")
   drop <- TRUE
@@ -482,16 +478,14 @@ ungroup.tbl_gpu <- function(x, ...) {
 #' @export
 #' @importFrom dplyr group_vars
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
+#' gpu_mtcars <- tbl_gpu(mtcars)
 #'
-#'   grouped <- gpu_mtcars |>
-#'     group_by(cyl, gear)
+#' grouped <- gpu_mtcars |>
+#'   group_by(cyl, gear)
 #'
-#'   group_vars(grouped)  # c("cyl", "gear")
-#' }
+#' group_vars(grouped)  # c("cyl", "gear")
 group_vars.tbl_gpu <- function(x) {
   x$groups
 }
@@ -507,16 +501,14 @@ group_vars.tbl_gpu <- function(x) {
 #' @export
 #' @importFrom dplyr groups
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
+#' gpu_mtcars <- tbl_gpu(mtcars)
 #'
-#'   grouped <- gpu_mtcars |>
-#'     group_by(cyl)
+#' grouped <- gpu_mtcars |>
+#'   group_by(cyl)
 #'
-#'   groups(grouped)  # list(as.symbol("cyl"))
-#' }
+#' groups(grouped)  # list(as.symbol("cyl"))
 groups.tbl_gpu <- function(x) {
   lapply(x$groups, as.symbol)
 }

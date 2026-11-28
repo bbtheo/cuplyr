@@ -160,27 +160,25 @@
 #' @export
 #' @importFrom dplyr filter
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
+#' gpu_mtcars <- tbl_gpu(mtcars)
 #'
-#'   # Filter with single condition
-#'   efficient_cars <- gpu_mtcars |>
-#'     filter(mpg > 25)
+#' # Filter with single condition
+#' efficient_cars <- gpu_mtcars |>
+#'   filter(mpg > 25)
 #'
-#'   # Multiple conditions (combined with AND)
-#'   result <- gpu_mtcars |>
-#'     filter(mpg > 20) |>
-#'     filter(cyl == 4) |>
-#'     collect()
+#' # Multiple conditions (combined with AND)
+#' result <- gpu_mtcars |>
+#'   filter(mpg > 20) |>
+#'   filter(cyl == 4) |>
+#'   collect()
 #'
-#'   # Compare two columns
-#'   gpu_cars <- tbl_gpu(cars)
-#'   fast_stops <- gpu_cars |>
-#'     filter(dist < speed) |>
-#'     collect()
-#' }
+#' # Compare two columns
+#' gpu_cars <- tbl_gpu(cars)
+#' fast_stops <- gpu_cars |>
+#'   filter(dist < speed) |>
+#'   collect()
 filter.tbl_gpu <- function(.data, ..., .by = NULL, .preserve = FALSE) {
   if (!is.null(.subset2(.data, "col_attrs")) && col_names_move(.data)) {
     return(rowwise_cpu(.data, "filter", reason = col_names_reason(.data)))

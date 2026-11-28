@@ -17,15 +17,15 @@ Returns a \code{tbl_gpu} that will defer operations until \code{collect()} or
 \code{compute()} is called.
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  # Create in eager mode, switch to lazy
-  gpu_data <- tbl_gpu(mtcars, lazy = FALSE) |>
-    as_lazy() |>
-    filter(mpg > 20) |>
-    mutate(kpl = mpg * 0.425)  # not yet executed
+# Create in eager mode, switch to lazy
+gpu_data <- tbl_gpu(mtcars, lazy = FALSE) |>
+  as_lazy() |>
+  filter(mpg > 20) |>
+  mutate(kpl = mpg * 0.425)  # not yet executed
 
-  # Execute with collect
-  result <- gpu_data |> collect()
-}
+# Execute with collect
+result <- gpu_data |> collect()
+\dontshow{\}) # examplesIf}
 }

@@ -20,6 +20,8 @@ A named list with GPU details:
 }
 
 If no GPU is available, returns \code{list(available = FALSE, device_count = 0)}.
+The same happens when the \code{CUPLYR_DISABLE_GPU} testing switch is on, see
+\code{\link[=has_gpu]{has_gpu()}}.
 }
 \description{
 Retrieves comprehensive information about the available GPU including

@@ -177,26 +177,26 @@ GPU, rather than ones that run in dplyr on the CPU.
 }
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  gpu_mtcars <- tbl_gpu(mtcars)
+gpu_mtcars <- tbl_gpu(mtcars)
 
-  # Filter with single condition
-  efficient_cars <- gpu_mtcars |>
-    filter(mpg > 25)
+# Filter with single condition
+efficient_cars <- gpu_mtcars |>
+  filter(mpg > 25)
 
-  # Multiple conditions (combined with AND)
-  result <- gpu_mtcars |>
-    filter(mpg > 20) |>
-    filter(cyl == 4) |>
-    collect()
+# Multiple conditions (combined with AND)
+result <- gpu_mtcars |>
+  filter(mpg > 20) |>
+  filter(cyl == 4) |>
+  collect()
 
-  # Compare two columns
-  gpu_cars <- tbl_gpu(cars)
-  fast_stops <- gpu_cars |>
-    filter(dist < speed) |>
-    collect()
-}
+# Compare two columns
+gpu_cars <- tbl_gpu(cars)
+fast_stops <- gpu_cars |>
+  filter(dist < speed) |>
+  collect()
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link{mutate.tbl_gpu}} for creating new columns,

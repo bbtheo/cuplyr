@@ -55,7 +55,9 @@ NULL
   }
 
   # Check GPU availability
-  gpu_ok <- tryCatch(
+  # (not under the CUPLYR_DISABLE_GPU testing switch: then the device is never
+  # queried and no memory resource is set up)
+  gpu_ok <- !gpu_disabled() && tryCatch(
     gpu_is_available(),
     error = function(e) FALSE
   )
@@ -74,6 +76,14 @@ NULL
 }
 
 .onAttach <- function(libname, pkgname) {
+  if (gpu_disabled()) {
+    packageStartupMessage(
+      "cuplyr: GPU-accelerated data manipulation\n",
+      "The GPU is disabled (CUPLYR_DISABLE_GPU is set). Package will not function correctly."
+    )
+    return(invisible())
+  }
+
   info <- tryCatch(gpu_info(), error = function(e) list(available = FALSE))
 
   if (isTRUE(info$available)) {

@@ -31,11 +31,11 @@ groups \code{x} already has (or of the whole table, if it is ungrouped). It is
 one \code{\link[=summarise.tbl_gpu]{summarise.tbl_gpu()}} call and runs on the GPU.
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  gpu_mtcars <- tbl_gpu(mtcars)
-  gpu_mtcars |> group_by(cyl) |> tally() |> collect()
-}
+gpu_mtcars <- tbl_gpu(mtcars)
+gpu_mtcars |> group_by(cyl) |> tally() |> collect()
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link{count.tbl_gpu}}

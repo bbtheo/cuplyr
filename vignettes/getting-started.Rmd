@@ -7,18 +7,15 @@ vignette: >
   %\VignetteEncoding{UTF-8}
 ---
 
-```{r, include = FALSE}
-knitr::opts_chunk$set(
-  collapse = TRUE,
-  comment = "#>",
-  eval = identical(Sys.getenv("CUPLYR_VIGNETTE_EVAL"), "true") && cuplyr::has_gpu()
-)
-```
+<!-- Generated from getting-started.Rmd.orig by tools/vignettes-knit; edit that file instead. -->
+
+
 
 cuplyr runs dplyr verbs on an NVIDIA GPU through the RAPIDS cuDF library. You
 write the same dplyr code. Only the table type changes.
 
-```{r setup}
+
+``` r
 library(cuplyr)
 library(dplyr)
 ```
@@ -32,12 +29,26 @@ dplyr is the better choice there.
 Copy a data frame to the GPU with `tbl_gpu()`, use dplyr verbs on it, and bring
 the result back to R with `collect()`. The original data frame is not changed.
 
-```{r create-tbl}
+
+``` r
 gpu_cars <- tbl_gpu(mtcars)
 gpu_cars
+#> # A tbl_gpu: 32 × 11
+#> $ mpg  <dbl> 21, 21, 22.8, 21.4, 18.7, 18.1, 14.3, 24.4, 22.8, 19.2
+#> $ cyl  <dbl> 6, 6, 4, 6, 8, 6, 8, 4, 4, 6
+#> $ disp <dbl> 160, 160, 108, 258, 360, 225, 360, 146.7, 140.8, 167.6
+#> $ hp   <dbl> 110, 110, 93, 110, 175, 105, 245, 62, 95, 123
+#> $ drat <dbl> 3.9, 3.9, 3.85, 3.08, 3.15, 2.76, 3.21, 3.69, 3.92, 3.92
+#> $ wt   <dbl> 2.62, 2.875, 2.32, 3.215, 3.44, 3.46, 3.57, 3.19, 3.15, 3.44
+#> $ qsec <dbl> 16.46, 17.02, 18.61, 19.44, 17.02, 20.22, 15.84, 20, 22.9, 18.3
+#> $ vs   <dbl> 0, 0, 1, 1, 0, 1, 0, 1, 1, 1
+#> $ am   <dbl> 1, 1, 1, 0, 0, 0, 0, 0, 0, 0
+#> $ gear <dbl> 4, 4, 4, 3, 3, 3, 3, 4, 4, 4
+#> $ carb <dbl> 4, 4, 1, 1, 2, 1, 4, 2, 2, 4
 ```
 
-```{r complete-example}
+
+``` r
 tbl_gpu(mtcars) |>
   filter(mpg > 15) |>
   mutate(power_to_weight = hp / wt) |>
@@ -50,13 +61,20 @@ tbl_gpu(mtcars) |>
   ) |>
   arrange(desc(avg_mpg)) |>
   collect()
+#> # A tibble: 3 × 5
+#>     cyl n_cars avg_mpg avg_power_ratio best_mpg
+#>   <dbl>  <int>   <dbl>           <dbl>    <dbl>
+#> 1     4     11    26.7            37.9     33.9
+#> 2     6      7    19.7            39.9     21.4
+#> 3     8      8    16.7            50.8     19.2
 ```
 
 ## Common verbs
 
 These work as they do in dplyr:
 
-```{r verb-examples, eval=FALSE}
+
+``` r
 filter(x > 10, y < 5)          # conditions are combined with AND
 filter(col_a > col_b)
 
@@ -97,23 +115,48 @@ Tables are lazy by default. Each verb adds a step to a plan, and the plan runs
 when you call `collect()` or `compute()`. Before it runs, cuplyr optimizes it,
 for example by moving filters earlier and fusing steps.
 
-```{r lazy-mode}
+
+``` r
 pipeline <- tbl_gpu(mtcars) |>
   filter(mpg > 20) |>
   mutate(x = hp * 2) |>
   filter(cyl == 4)
 
 is_lazy(pipeline)          # TRUE
+#> [1] TRUE
 has_pending_ops(pipeline)  # TRUE
+#> [1] TRUE
 show_query(pipeline)       # the plan, as R code
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 11
+#> filter(cyl == 4, mpg > 20)
+#> mutate(x = hp * 2)
 ```
 
 Errors such as a missing column or a type mismatch still appear at the verb that
 causes them, not at `collect()`:
 
-```{r errors, error=TRUE}
+
+``` r
 try(tbl_gpu(mtcars) |> filter(nonexistent_column > 5))
+#> Error in filter(tbl_gpu(mtcars), nonexistent_column > 5) : 
+#>   ℹ In argument: `nonexistent_column > 5`.
+#> Caused by error:
+#> ! object 'nonexistent_column' not found
 try(tbl_gpu(mtcars) |> filter(mpg > "not a number"))
+#> # A tbl_gpu: 0 × 11
+#> $ mpg  <dbl> 
+#> $ cyl  <dbl> 
+#> $ disp <dbl> 
+#> $ hp   <dbl> 
+#> $ drat <dbl> 
+#> $ wt   <dbl> 
+#> $ qsec <dbl> 
+#> $ vs   <dbl> 
+#> $ am   <dbl> 
+#> $ gear <dbl> 
+#> $ carb <dbl>
 ```
 
 Printing a lazy table runs the plan and shows the first rows under a
@@ -123,9 +166,11 @@ twice.
 In eager mode each verb runs right away, which helps when you step through a
 pipeline:
 
-```{r eager-mode}
+
+``` r
 eager_tbl <- tbl_gpu(mtcars, lazy = FALSE)
 is_lazy(eager_tbl)  # FALSE
+#> [1] FALSE
 ```
 
 To make every table eager, set `options(cuplyr.exec_mode = "eager")` or the
@@ -138,7 +183,8 @@ current value, and `?"cuplyr-options"` documents them.
 `compute()` runs the pending steps and keeps the result on the GPU. Use it when
 several analyses start from the same base, so the shared steps run once:
 
-```{r compute}
+
+``` r
 base_data <- tbl_gpu(mtcars) |>
   filter(mpg > 15) |>
   mutate(power_ratio = hp / wt) |>
@@ -154,11 +200,42 @@ R's garbage collector frees a table's GPU memory once nothing refers to it.
 `gpu_memory_state()` shows current use, and `gpu_gc()` frees unreferenced
 tables right away.
 
-```{r memory}
+
+``` r
 gpu_memory_state()
+#> $available
+#> [1] TRUE
+#> 
+#> $total_bytes
+#> [1] 12418416640
+#> 
+#> $free_bytes
+#> [1] 11586174976
+#> 
+#> $used_bytes
+#> [1] 832241664
+#> 
+#> $total_gb
+#> [1] 12.41842
+#> 
+#> $free_gb
+#> [1] 11.58617
+#> 
+#> $used_gb
+#> [1] 0.8322417
+#> 
+#> $resource
+#> [1] "async"
+#> 
+#> $pool_bytes
+#> [1] 33554432
+#> 
+#> $pool_used_bytes
+#> [1] 1141194
 ```
 
-```{r gc, eval=FALSE}
+
+``` r
 gpu_gc()
 ```
 

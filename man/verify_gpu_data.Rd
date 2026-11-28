@@ -28,15 +28,15 @@ This function performs multiple verification steps:
 }
 }
 \examples{
-if (has_gpu()) {
-  gpu_mtcars <- tbl_gpu(mtcars)
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
+gpu_mtcars <- tbl_gpu(mtcars)
 
-  # Should return TRUE
-  verify_gpu_data(gpu_mtcars)
+# Should return TRUE
+verify_gpu_data(gpu_mtcars)
 
-  # Regular data frames return FALSE
-  verify_gpu_data(mtcars)
-}
+# Regular data frames return FALSE
+verify_gpu_data(mtcars)
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link{gpu_object_info}} for detailed object information,

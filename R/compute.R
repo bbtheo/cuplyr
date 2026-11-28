@@ -40,21 +40,19 @@
 #' @export
 #' @importFrom dplyr compute
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   # Lazy pipeline
-#'   lazy_result <- tbl_gpu(mtcars) |>  # lazy by default
-#'     filter(mpg > 20) |>
-#'     mutate(kpl = mpg * 0.425)
+#' # Lazy pipeline
+#' lazy_result <- tbl_gpu(mtcars) |>  # lazy by default
+#'   filter(mpg > 20) |>
+#'   mutate(kpl = mpg * 0.425)
 #'
-#'   # Force execution, keep on GPU
-#'   gpu_result <- lazy_result |> compute()
+#' # Force execution, keep on GPU
+#' gpu_result <- lazy_result |> compute()
 #'
-#'   # Now branch into two different analyses
-#'   analysis1 <- gpu_result |> filter(cyl == 4) |> collect()
-#'   analysis2 <- gpu_result |> filter(cyl == 6) |> collect()
-#' }
+#' # Now branch into two different analyses
+#' analysis1 <- gpu_result |> filter(cyl == 4) |> collect()
+#' analysis2 <- gpu_result |> filter(cyl == 6) |> collect()
 compute.tbl_gpu <- function(x, ..., name = NULL) {
   if (!is_tbl_gpu(x)) {
     stop("compute() requires a tbl_gpu object", call. = FALSE)
@@ -196,16 +194,14 @@ collapse.tbl_gpu <- function(x, ...) {
 #'
 #' @export
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   # Tables are lazy by default; switch to eager mid-pipeline
-#'   result <- tbl_gpu(mtcars) |>
-#'     filter(mpg > 20) |>
-#'     as_eager() |>
-#'     mutate(x = hp * 2) |>  # executes immediately
-#'     collect()
-#' }
+#' # Tables are lazy by default; switch to eager mid-pipeline
+#' result <- tbl_gpu(mtcars) |>
+#'   filter(mpg > 20) |>
+#'   as_eager() |>
+#'   mutate(x = hp * 2) |>  # executes immediately
+#'   collect()
 as_eager <- function(.data) {
   if (!is_tbl_gpu(.data)) {
     stop("as_eager() requires a tbl_gpu object", call. = FALSE)
@@ -230,18 +226,16 @@ as_eager <- function(.data) {
 #'
 #' @export
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   # Create in eager mode, switch to lazy
-#'   gpu_data <- tbl_gpu(mtcars, lazy = FALSE) |>
-#'     as_lazy() |>
-#'     filter(mpg > 20) |>
-#'     mutate(kpl = mpg * 0.425)  # not yet executed
+#' # Create in eager mode, switch to lazy
+#' gpu_data <- tbl_gpu(mtcars, lazy = FALSE) |>
+#'   as_lazy() |>
+#'   filter(mpg > 20) |>
+#'   mutate(kpl = mpg * 0.425)  # not yet executed
 #'
-#'   # Execute with collect
-#'   result <- gpu_data |> collect()
-#' }
+#' # Execute with collect
+#' result <- gpu_data |> collect()
 as_lazy <- function(.data) {
   if (!is_tbl_gpu(.data)) {
     stop("as_lazy() requires a tbl_gpu object", call. = FALSE)
@@ -258,14 +252,12 @@ as_lazy <- function(.data) {
 #'
 #' @export
 #'
-#' @examples
-#' if (has_gpu()) {
-#'   lazy_tbl <- tbl_gpu(mtcars)
-#'   is_lazy(lazy_tbl)   # TRUE
+#' @examplesIf has_gpu()
+#' lazy_tbl <- tbl_gpu(mtcars)
+#' is_lazy(lazy_tbl)   # TRUE
 #'
-#'   eager_tbl <- tbl_gpu(mtcars, lazy = FALSE)
-#'   is_lazy(eager_tbl)  # FALSE
-#' }
+#' eager_tbl <- tbl_gpu(mtcars, lazy = FALSE)
+#' is_lazy(eager_tbl)  # FALSE
 is_lazy <- function(.data) {
   is_tbl_gpu(.data) && identical(.data$exec_mode, "lazy")
 }
@@ -332,16 +324,14 @@ has_pending_ops <- function(.data) {
 #'
 #' @export
 #' @importFrom dplyr show_query
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   q <- tbl_gpu(mtcars) |>
-#'     mutate(kpl = mpg * 0.425, hp2 = hp * 2) |>
-#'     filter(cyl == 4) |>
-#'     select(mpg, kpl)
-#'   show_query(q)
-#'   show_query(q, optimized = FALSE)
-#' }
+#' q <- tbl_gpu(mtcars) |>
+#'   mutate(kpl = mpg * 0.425, hp2 = hp * 2) |>
+#'   filter(cyl == 4) |>
+#'   select(mpg, kpl)
+#' show_query(q)
+#' show_query(q, optimized = FALSE)
 show_query.tbl_gpu <- function(x, ..., optimized = TRUE) {
   rlang::check_dots_empty()
   check_plan_optimized(optimized)

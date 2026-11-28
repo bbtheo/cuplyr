@@ -91,28 +91,28 @@ other verb, and any change of grouping, drops them.
 }
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  gpu_mtcars <- tbl_gpu(mtcars)
+gpu_mtcars <- tbl_gpu(mtcars)
 
-  # Group by a single column
-  by_cyl <- gpu_mtcars |>
-    group_by(cyl)
+# Group by a single column
+by_cyl <- gpu_mtcars |>
+  group_by(cyl)
 
-  # Group by multiple columns
-  by_cyl_gear <- gpu_mtcars |>
-    group_by(cyl, gear)
+# Group by multiple columns
+by_cyl_gear <- gpu_mtcars |>
+  group_by(cyl, gear)
 
-  # Computed group column
-  by_half_cyl <- gpu_mtcars |>
-    group_by(half_cyl = cyl \%/\% 2)
+# Computed group column
+by_half_cyl <- gpu_mtcars |>
+  group_by(half_cyl = cyl \%/\% 2)
 
-  # Use with summarise for aggregation
-  result <- gpu_mtcars |>
-    group_by(cyl) |>
-    summarise(mean_mpg = mean(mpg)) |>
-    collect()
-}
+# Use with summarise for aggregation
+result <- gpu_mtcars |>
+  group_by(cyl) |>
+  summarise(mean_mpg = mean(mpg)) |>
+  collect()
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link{summarise.tbl_gpu}} for aggregating grouped data,

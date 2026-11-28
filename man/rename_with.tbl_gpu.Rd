@@ -28,12 +28,12 @@ similar to \code{dplyr::rename_with()}. Runs entirely as a schema-only
 operation, like \code{\link[=rename.tbl_gpu]{rename.tbl_gpu()}}.
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  gpu_mtcars <- tbl_gpu(mtcars)
+gpu_mtcars <- tbl_gpu(mtcars)
 
-  result <- gpu_mtcars |>
-    rename_with(toupper) |>
-    collect()
-}
+result <- gpu_mtcars |>
+  rename_with(toupper) |>
+  collect()
+\dontshow{\}) # examplesIf}
 }

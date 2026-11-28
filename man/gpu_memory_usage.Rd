@@ -41,11 +41,11 @@ This is an estimate and actual GPU memory usage may be higher due to:
 }
 }
 \examples{
-if (has_gpu()) {
-  gpu_mtcars <- tbl_gpu(mtcars)
-  size <- gpu_memory_usage(gpu_mtcars)
-  cat("Estimated GPU memory:", round(size / 1024, 1), "KB\n")
-}
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
+gpu_mtcars <- tbl_gpu(mtcars)
+size <- gpu_memory_usage(gpu_mtcars)
+cat("Estimated GPU memory:", round(size / 1024, 1), "KB\n")
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link{gpu_details}} for overall GPU memory info,

@@ -214,15 +214,15 @@ unsetting the variable later has no effect.
 }
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  path <- tempfile(fileext = ".parquet")
-  write_parquet_gpu(tbl_gpu(mtcars), path)
-  read_parquet_gpu(path) |>
-    filter(mpg > 25) |>
-    collect()
-  unlink(path)
-}
+path <- tempfile(fileext = ".parquet")
+write_parquet_gpu(tbl_gpu(mtcars), path)
+read_parquet_gpu(path) |>
+  filter(mpg > 25) |>
+  collect()
+unlink(path)
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link[=tbl_gpu]{tbl_gpu()}}, \code{\link[=collect.tbl_gpu]{collect.tbl_gpu()}}

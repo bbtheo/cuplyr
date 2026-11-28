@@ -61,13 +61,13 @@ filters moved and, for a parquet scan, the reader's filter and columns shown.
 plan: it runs each verb when it is called.
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  q <- tbl_gpu(mtcars) |>
-    mutate(kpl = mpg * 0.425, hp2 = hp * 2) |>
-    filter(cyl == 4) |>
-    select(mpg, kpl)
-  show_query(q)
-  show_query(q, optimized = FALSE)
-}
+q <- tbl_gpu(mtcars) |>
+  mutate(kpl = mpg * 0.425, hp2 = hp * 2) |>
+  filter(cyl == 4) |>
+  select(mpg, kpl)
+show_query(q)
+show_query(q, optimized = FALSE)
+\dontshow{\}) # examplesIf}
 }

@@ -317,34 +317,34 @@ peak GPU memory is that of the \code{group_by()} form plus up to 12 bytes a row.
 }
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  gpu_mtcars <- tbl_gpu(mtcars)
+gpu_mtcars <- tbl_gpu(mtcars)
 
-  # Simple aggregation over all rows
-  total <- gpu_mtcars |>
-    summarise(avg_mpg = mean(mpg)) |>
-    collect()
+# Simple aggregation over all rows
+total <- gpu_mtcars |>
+  summarise(avg_mpg = mean(mpg)) |>
+  collect()
 
-  # Grouped aggregation
-  by_cyl <- gpu_mtcars |>
-    group_by(cyl) |>
-    summarise(
-      avg_mpg = mean(mpg),
-      max_hp = max(hp),
-      count = n()
-    ) |>
-    collect()
+# Grouped aggregation
+by_cyl <- gpu_mtcars |>
+  group_by(cyl) |>
+  summarise(
+    avg_mpg = mean(mpg),
+    max_hp = max(hp),
+    count = n()
+  ) |>
+  collect()
 
-  # Multiple grouping columns
-  by_cyl_gear <- gpu_mtcars |>
-    group_by(cyl, gear) |>
-    summarise(
-      mean_mpg = mean(mpg),
-      min_wt = min(wt)
-    ) |>
-    collect()
-}
+# Multiple grouping columns
+by_cyl_gear <- gpu_mtcars |>
+  group_by(cyl, gear) |>
+  summarise(
+    mean_mpg = mean(mpg),
+    min_wt = min(wt)
+  ) |>
+  collect()
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link{group_by.tbl_gpu}} for grouping data,

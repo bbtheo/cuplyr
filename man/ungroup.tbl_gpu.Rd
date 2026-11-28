@@ -20,18 +20,18 @@ Removes grouping from a grouped \code{tbl_gpu} object: all of it, or only the
 group columns selected in \code{...}.
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  gpu_mtcars <- tbl_gpu(mtcars)
+gpu_mtcars <- tbl_gpu(mtcars)
 
-  grouped <- gpu_mtcars |>
-    group_by(cyl)
+grouped <- gpu_mtcars |>
+  group_by(cyl)
 
-  # Remove grouping
-  ungrouped <- grouped |>
-    ungroup()
+# Remove grouping
+ungrouped <- grouped |>
+  ungroup()
 
-  # Verify groups are removed
-  length(group_vars(ungrouped))  # 0
-}
+# Verify groups are removed
+length(group_vars(ungrouped))  # 0
+\dontshow{\}) # examplesIf}
 }

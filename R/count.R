@@ -345,13 +345,11 @@ build_count_agg_call <- function(wt_quo, schema, for_mutate = FALSE) {
 #' @export
 #' @importFrom dplyr count
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
-#'   gpu_mtcars |> count(cyl) |> collect()
-#'   gpu_mtcars |> count(cyl, sort = TRUE) |> collect()
-#' }
+#' gpu_mtcars <- tbl_gpu(mtcars)
+#' gpu_mtcars |> count(cyl) |> collect()
+#' gpu_mtcars |> count(cyl, sort = TRUE) |> collect()
 count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
                           .drop = dplyr::group_by_drop_default(x)) {
   # (dplyr's group_by() checks of the names written in `...`, before anything
@@ -458,12 +456,10 @@ count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL,
 #' @export
 #' @importFrom dplyr tally
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
-#'   gpu_mtcars |> group_by(cyl) |> tally() |> collect()
-#' }
+#' gpu_mtcars <- tbl_gpu(mtcars)
+#' gpu_mtcars |> group_by(cyl) |> tally() |> collect()
 tally.tbl_gpu <- function(x, wt = NULL, sort = FALSE, name = NULL) {
   if (is_rowwise_gpu(x)) {
     return(rowwise_cpu(x, "tally"))
@@ -534,12 +530,10 @@ tally.tbl_gpu <- function(x, wt = NULL, sort = FALSE, name = NULL) {
 #' @export
 #' @importFrom dplyr add_count
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
-#'   gpu_mtcars |> add_count(cyl) |> collect()
-#' }
+#' gpu_mtcars <- tbl_gpu(mtcars)
+#' gpu_mtcars |> add_count(cyl) |> collect()
 add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .drop = NULL) {
   if (is_rowwise_gpu(x)) {
     return(rowwise_cpu(x, "add_count"))

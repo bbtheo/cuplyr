@@ -16,13 +16,13 @@ A character vector of grouping column names.
 Returns the names of columns used for grouping.
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  gpu_mtcars <- tbl_gpu(mtcars)
+gpu_mtcars <- tbl_gpu(mtcars)
 
-  grouped <- gpu_mtcars |>
-    group_by(cyl, gear)
+grouped <- gpu_mtcars |>
+  group_by(cyl, gear)
 
-  group_vars(grouped)  # c("cyl", "gear")
-}
+group_vars(grouped)  # c("cyl", "gear")
+\dontshow{\}) # examplesIf}
 }

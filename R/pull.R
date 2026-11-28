@@ -42,12 +42,10 @@
 #' @export
 #' @importFrom dplyr pull
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
-#'   gpu_mtcars |> pull(mpg)
-#' }
+#' gpu_mtcars <- tbl_gpu(mtcars)
+#' gpu_mtcars |> pull(mpg)
 pull.tbl_gpu <- function(.data, var = -1, name = NULL, ...) {
   var_quo <- rlang::enquo(var)
   name_quo <- rlang::enquo(name)

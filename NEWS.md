@@ -1,5 +1,12 @@
 # cuplyr (development version)
 
+* `has_gpu()` follows a new testing switch: with the environment variable
+  `CUPLYR_DISABLE_GPU` set to `"true"` or `"1"`, `has_gpu()` and `gpu_details()`
+  report no GPU, and loading cuplyr does not query the device. Examples that
+  need a GPU are guarded with `@examplesIf has_gpu()`, so they and the
+  vignettes build on a machine without one. The vignettes are precomputed on a
+  GPU from `vignettes/*.Rmd.orig` with real output (#138).
+
 # cuplyr 0.2.0
 
 cuplyr 0.2.0 brings most of dplyr to the GPU. Nearly every dplyr verb now

@@ -29,12 +29,12 @@ column errors, matching \code{dplyr::rename()}. A same-call swap (e.g.
 replaced at once.
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  gpu_mtcars <- tbl_gpu(mtcars)
+gpu_mtcars <- tbl_gpu(mtcars)
 
-  result <- gpu_mtcars |>
-    rename(miles_per_gallon = mpg) |>
-    collect()
-}
+result <- gpu_mtcars |>
+  rename(miles_per_gallon = mpg) |>
+  collect()
+\dontshow{\}) # examplesIf}
 }

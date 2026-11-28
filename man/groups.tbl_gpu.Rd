@@ -16,13 +16,13 @@ A list of symbols for the grouping columns.
 Returns a list of symbols representing the grouping columns.
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  gpu_mtcars <- tbl_gpu(mtcars)
+gpu_mtcars <- tbl_gpu(mtcars)
 
-  grouped <- gpu_mtcars |>
-    group_by(cyl)
+grouped <- gpu_mtcars |>
+  group_by(cyl)
 
-  groups(grouped)  # list(as.symbol("cyl"))
-}
+groups(grouped)  # list(as.symbol("cyl"))
+\dontshow{\}) # examplesIf}
 }

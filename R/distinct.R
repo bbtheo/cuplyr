@@ -46,20 +46,18 @@
 #' @export
 #' @importFrom dplyr distinct
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
+#' gpu_mtcars <- tbl_gpu(mtcars)
 #'
-#'   # All columns as key, original row order preserved
-#'   result <- gpu_mtcars |> distinct() |> collect()
+#' # All columns as key, original row order preserved
+#' result <- gpu_mtcars |> distinct() |> collect()
 #'
-#'   # Key on specific columns, only those columns in the result
-#'   result <- gpu_mtcars |> distinct(cyl, gear) |> collect()
+#' # Key on specific columns, only those columns in the result
+#' result <- gpu_mtcars |> distinct(cyl, gear) |> collect()
 #'
-#'   # Key on specific columns, but keep every column (first row per key)
-#'   result <- gpu_mtcars |> distinct(cyl, .keep_all = TRUE) |> collect()
-#' }
+#' # Key on specific columns, but keep every column (first row per key)
+#' result <- gpu_mtcars |> distinct(cyl, .keep_all = TRUE) |> collect()
 distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
   if (!is.null(.subset2(.data, "col_attrs")) && col_names_move(.data)) {
     return(rowwise_cpu(.data, "distinct", reason = col_names_reason(.data)))

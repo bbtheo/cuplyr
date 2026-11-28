@@ -1,0 +1,304 @@
+---
+title: "GPU memory in cuplyr"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{GPU memory in cuplyr}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+<!-- Generated from memory.Rmd.orig by tools/vignettes-knit; edit that file instead. -->
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+## Introduction
+
+Every process on a GPU shares its memory: your R session, other R sessions, a
+Python notebook, the desktop. cuplyr allocates many short-lived columns while
+it runs a pipeline. How it asks the driver for that memory decides how fast
+each call is, how much of the card cuplyr keeps after you drop a table, and how
+much is left for other processes.
+
+This article covers the three ways cuplyr can allocate, how to switch between
+them, how to read what cuplyr holds, when memory is freed, and how to choose.
+It ends with numbers from one machine.
+
+```{r setup}
+library(cuplyr)
+library(dplyr)
+```
+
+## The three resources
+
+When it loads, cuplyr installs one RMM memory resource. Every GPU allocation in
+the R process goes through it.
+
+| Resource | What it is | Speed per allocation | Memory after you drop a table | Sharing the card |
+|---|---|---|---|---|
+| `"async"` (default) | CUDA's stream-ordered allocator (`cudaMallocAsync`) | Fast, same as the pool | Cached for reuse until `gpu_gc()` returns it, or returned by CUDA with the opt-in `cuplyr.release_threshold` | Good, `gpu_gc()` hands back what you dropped |
+| `"pool"` | RMM's pool, one big reservation split into columns | Fast | Kept until the R session ends, the pool never shrinks | Poor, the card stays as full as your peak |
+| `"cuda"` | No resource, a plain `cudaMalloc`/`cudaFree` per column | Slowest | Returned to the device when R collects the table | Good, but every allocation pays the driver |
+
+With `async`, cuplyr reserves `cuplyr.pool_initial` bytes at load so the first
+calls need no driver allocation. The default is a quarter of free device
+memory, at most 1 GiB. The async pool then grows when a pipeline needs more and
+keeps what it grew to for the next call, which is why it is as fast as the
+pool. Unlike the pool it can give memory back. `gpu_gc()` synchronises the
+device and returns everything the async pool holds unused, so a pipeline that
+briefly needed 6 GB doesn't hold 6 GB for the rest of the session.
+
+### Automatic release
+
+To get memory back without calling `gpu_gc()`, set `cuplyr.release_threshold`
+in bytes. At every GPU synchronisation, CUDA then returns unused memory until
+the pool's whole reservation is at or below the threshold. The reservation
+includes the tables you hold and results R hasn't collected yet. So while your
+session holds more than the threshold, nothing freed stays cached, and every
+allocation goes to the driver at about the speed of plain `cudaMalloc`. A
+threshold of `0` keeps nothing. libcudf synchronises inside many calls, not
+only in `collect()`, `print()` and `gpu_sync()`, so a release can happen in the
+middle of a pipeline. The table at the end shows the cost.
+
+## Switching resources
+
+cuplyr picks the resource when the package loads, one per R process. Set the
+option before `library(cuplyr)`, and restart R to change it.
+
+| What | Option | Environment variable |
+|---|---|---|
+| Kind of resource: `"async"` (default), `"pool"`, or `"cuda"`/`"none"` for no resource | `cuplyr.memory_resource` | `CUPLYR_MEMORY_RESOURCE` |
+| Turn the resource off (`"cuda"`): `FALSE`, `"0"`, `"false"`, `"no"`, `"off"` | `cuplyr.memory_pool` | `CUPLYR_MEMORY_POOL` |
+| How much the resource reserves at load, in bytes (not a limit) | `cuplyr.pool_initial` | `CUPLYR_POOL_INITIAL` |
+| Async only: release unused memory automatically while the whole reservation is above this many bytes | `cuplyr.release_threshold` | `CUPLYR_RELEASE_THRESHOLD` |
+
+An option wins over its environment variable. Case and surrounding spaces
+don't matter. `cuplyr_options()` shows the values as set now, which take effect
+at the next load, not the ones this session's resource was installed with.
+`?"cuplyr-options"` documents them all.
+
+cuplyr warns about invalid values and falls back:
+
+- An unknown kind, say `"managed"`, gives `"async"`. If `cuplyr.memory_pool`
+  turns the resource off, the kind is ignored and no resource is used.
+- A `cuplyr.release_threshold` of `NA` or `""` counts as unset, so the
+  environment variable decides. Any other value that isn't a non-negative
+  number means no automatic release. `"pool"` and `"cuda"` ignore the
+  threshold.
+- If the GPU or driver doesn't support `cudaMallocAsync` and async was only the
+  default, cuplyr installs `"pool"`. If you asked for `"async"` by name, it
+  installs no resource (`"cuda"`).
+
+```{r switch, eval = FALSE}
+# In a fresh R session, before loading cuplyr:
+options(cuplyr.memory_resource = "pool")   # the pool instead of async
+# or: options(cuplyr.memory_resource = "cuda")  # plain cudaMalloc; same as
+#     options(cuplyr.memory_pool = FALSE)
+# or: options(cuplyr.release_threshold = 0)      # async: keep nothing cached
+library(cuplyr)
+```
+
+From a shell, `CUPLYR_MEMORY_RESOURCE=pool Rscript script.R` does the same.
+`cuplyr.pool_initial = 0` only skips the reservation at load. The pool still
+grows and caches as it needs.
+
+## Reading the numbers
+
+`gpu_memory_state()` reports the device and what cuplyr's resource holds.
+
+```{r state}
+st <- gpu_memory_state()
+st$resource
+c(free = st$free_bytes, pool = st$pool_bytes, in_use = st$pool_used_bytes)
+```
+
+* `free_bytes`, `used_bytes` and `total_bytes` cover the whole device, every
+  process, as `nvidia-smi` shows. `used_bytes` includes memory the resource
+  keeps for reuse, so dropping a table doesn't lower it until the memory goes
+  back. Under `"pool"` that never happens. Under `"async"` it happens after
+  `gpu_gc()` or an automatic release.
+* `pool_bytes` is what cuplyr's resource holds from the device.
+* `pool_used_bytes` is what cuplyr uses for live columns and scratch space. It
+  rises when you create a table and falls when R collects it.
+* Under `"cuda"` there is no resource, so `pool_bytes` and `pool_used_bytes` are
+  `NA` and `free_bytes` tells the whole story.
+
+To see how big your tables are, read `pool_used_bytes`. To see how much of the
+card you take from others, read `pool_bytes` or `free_bytes`.
+
+```{r usage}
+gpu_df <- tbl_gpu(data.frame(x = runif(1e6)), lazy = FALSE)
+gpu_memory_usage(gpu_df)  # estimate from dimensions and types
+gpu_memory_state()$pool_used_bytes
+```
+
+`gpu_memory_usage()` estimates a table's size from its row count and column
+types without touching the device. Tables that share columns, such as a
+`select()` of another table, overlap in this estimate.
+
+## When is memory freed?
+
+1. A call frees its own intermediates. A lazy table, the default, holds nothing
+   for its pending steps. An eager verb, `compute()`, `collect()` or
+   `bind_rows()` frees the temporary tables its steps built when it returns.
+2. Tables you hold live until R's garbage collector runs. After `rm(gpu_df)`
+   the memory is freed when R collects it. R doesn't know about GPU memory
+   pressure, so that can be late.
+3. `gpu_gc()` forces the collection. Under `async` it then returns all unused
+   memory to the device. The next calls must grow the pool again, which costs
+   the first call a few percent, so keep it out of timing loops. In the list it
+   returns, `freed_bytes` is the drop in `pool_used_bytes` and `released_bytes`
+   the drop in `pool_bytes`. `released_bytes` is 0 under `"pool"` and `NA`
+   under `"cuda"`. If the device is in a CUDA error state, `gpu_gc()` warns
+   instead of failing.
+4. When a GPU step runs out of device memory, cuplyr runs `gc()` and
+   `gpu_gc(aggressive = FALSE)` and retries the step once. A second failure
+   raises an error of class `cuplyr_error_gpu_oom`.
+
+```{r gc}
+rm(gpu_df)
+res <- gpu_gc()
+c(freed = res$freed_bytes, released = res$released_bytes)
+```
+
+## How to choose
+
+* Keep the default, `async`, unless you have a reason not to. It is as fast as
+  the pool and `gpu_gc()` hands its memory back.
+* Use `"pool"` only when cuplyr is the card's only user. It never gives memory
+  back, not even after `gpu_gc()`. Released cuplyr versions up to 0.1.1 used
+  no resource, which is `"cuda"`.
+* Use `"cuda"` to debug memory, since device free memory is then exactly what
+  you hold. Calls are slower.
+* If you share the card, stay on `async` and call `gpu_gc()` after a large job.
+  If you can't, set `cuplyr.release_threshold` above what your session holds
+  while it works, counting live tables and uncollected results. Below that,
+  every call allocates from the driver and runs at about the speed of `"cuda"`.
+* No resource lets data bigger than the card fit. They only change how much is
+  held on the side.
+
+## Measured on this machine
+
+Measured on 2026-10-23 with cuplyr 0.1.1.9000 on an RTX 5070 (12 GB). Each
+number is the median of 3 fresh R processes per configuration. The table is
+static and nothing is timed when this vignette builds.
+
+The columns are `async` as shipped, `async` with `cuplyr.release_threshold = 0`,
+`pool`, and `cuda`. Per-call time is the median over batches of calls after
+warm-up, with a GPU synchronisation at the end of each batch.
+
+* Small eager mutate: `mutate(z = x * 2 + y)` on an eager 1000-row table.
+* 1e6-row lazy pipeline: `filter()`, `mutate()`, `group_by()`, `summarise()`
+  and `collect()` on a lazy 1e6-row table.
+* 25M-row workflow: the README benchmark (`filter()`, `mutate()`, `group_by()`,
+  `summarise()`, `collect()`) on a lazy table of 25 million rows and 6 columns,
+  about 1 GB on the GPU.
+
+Held memory is extra device memory in use compared with a starting point taken
+after `gpu_gc()` and before the table exists. "After gc + sync" means after
+dropping the table, running `gc()` and synchronising. The last row is
+`pool_bytes` after the 1 GB run's `gpu_gc()`.
+
+| Measurement | `async` | `async`, `release_threshold = 0` | `pool` | `cuda` |
+|---|---|---|---|---|
+| Small eager mutate (ms per call) | 0.85 | 0.86 | 0.84 | 0.87 |
+| 1e6-row lazy pipeline (ms per call) | 3.3 | 3.5 | 3.3 | 4.1 |
+| 25M-row workflow (ms per call) | 14.3 | 19.0 | 14.3 | 18.0 |
+| 1 GB table dropped, extra memory held after gc + sync (GB) | 1.01 | 0.00 | 0.00 | 0.00 |
+| 1 GB table, after `gpu_gc()` (GB) | 0.00 | 0.00 | 0.00 | 0.00 |
+| 3 GB table dropped, extra memory held after gc + sync (GB) | 3.02 | 0.00 | 4.29 | 0.00 |
+| 3 GB table, after `gpu_gc()` (GB) | 0.00 | 0.00 | 4.29 | 0.00 |
+| Held by the resource after `gpu_gc()`, 1 GB run (GB) | 0.00 | 0.00 | 4.29 | n/a (no resource) |
+
+* Default `async` and `pool` run at the same speed. Plain `cuda` is slower at
+  1e6 rows (4.1 ms) and about 25% slower on the 25M-row workflow (18.0 ms).
+* `async` with `release_threshold = 0` keeps nothing after a synchronisation,
+  but every call allocates from the driver again. The 25M-row workflow takes
+  19.0 ms, about a third slower than the default.
+* Default `async` keeps a dropped table cached (1.01 and 3.02 GB) until
+  `gpu_gc()` returns all of it.
+* `pool` ran its measurements in order in one process, and the 25M-row workflow
+  had already grown the pool to 4.29 GB. The 1 GB table fit inside that. The
+  3 GB table grew the pool by another 4.29 GB, since it grows in large steps,
+  and the pool kept it even after `gpu_gc()`.
+* `cuda` gets memory back as soon as R collects the table.
+
+To repeat the measurement, run the code below once per configuration, each in a
+fresh session started with `CUPLYR_MEMORY_RESOURCE=async`,
+`CUPLYR_MEMORY_RESOURCE=async CUPLYR_RELEASE_THRESHOLD=0`,
+`CUPLYR_MEMORY_RESOURCE=pool`, or `CUPLYR_MEMORY_POOL=0`, and take the median of
+a few runs.
+
+```{r measure, eval = FALSE}
+library(cuplyr)
+library(dplyr)
+
+# Median seconds per call over `samples` batches of `reps` calls.
+per_call <- function(fn, reps, samples = 15, warmup = 5) {
+  for (i in seq_len(warmup)) fn()
+  gpu_sync()
+  t <- vapply(seq_len(samples), function(i) {
+    gc(verbose = FALSE)
+    t0 <- proc.time()[["elapsed"]]
+    for (j in seq_len(reps)) fn()
+    gpu_sync()
+    (proc.time()[["elapsed"]] - t0) / reps
+  }, numeric(1))
+  median(t)
+}
+
+small <- tbl_gpu(data.frame(x = runif(1000), y = runif(1000)), lazy = FALSE)
+1e3 * per_call(function() mutate(small, z = x * 2 + y), reps = 200)
+
+big <- data.frame(x = runif(1e6), y = runif(1e6), k = sample.int(100L, 1e6, TRUE))
+lz <- tbl_gpu(big, lazy = TRUE)
+1e3 * per_call(function() {
+  lz |> filter(x > 0.1) |> mutate(z = x * y) |>
+    group_by(k) |> summarise(s = sum(z)) |> collect()
+}, reps = 10)
+rm(small, lz, big)
+
+# README-scale workflow: 25M rows x 6 columns (about 1 GB on the GPU).
+n <- 25e6
+taxi <- data.frame(
+  VendorID = sample(1:4, n, replace = TRUE),
+  payment_type = sample(1:5, n, replace = TRUE),
+  fare_amount = pmax(2.5, rnorm(n, mean = 13, sd = 10)),
+  tip_amount = pmax(0, rnorm(n, mean = 2.5, sd = 3)),
+  tolls_amount = runif(n, 0, 15),
+  trip_distance = pmax(0.1, rexp(n, rate = 0.3)))
+tg <- tbl_gpu(taxi, lazy = TRUE)
+rm(taxi); gc()
+1e3 * per_call(function() {
+  tg |> filter(fare_amount > 0, trip_distance > 0) |>
+    mutate(fare_per_mile = fare_amount / trip_distance) |>
+    group_by(VendorID, payment_type) |>
+    summarise(avg_fare_per_mile = mean(fare_per_mile),
+              avg_tip = mean(tip_amount), .groups = "drop") |>
+    collect()
+}, reps = 3, samples = 9, warmup = 2)
+rm(tg)
+
+# Held memory for a table of n doubles (1.25e8 = 1 GB, 3.75e8 = 3 GB).
+held <- function(n) {
+  host <- data.frame(a = runif(n))
+  gpu_gc()
+  free0 <- gpu_memory_state()$free_bytes   # the starting point
+  g <- tbl_gpu(host, lazy = FALSE)
+  gpu_sync()
+  rm(g); gc(); gc()
+  gpu_sync()
+  after_gc_sync <- free0 - gpu_memory_state()$free_bytes
+  gpu_gc()
+  s <- gpu_memory_state()
+  after_gpu_gc <- free0 - s$free_bytes
+  c(after_gc_sync = after_gc_sync, after_gpu_gc = after_gpu_gc,
+    pool_bytes = s$pool_bytes) / 1e9
+}
+held(1.25e8)
+held(3.75e8)
+```

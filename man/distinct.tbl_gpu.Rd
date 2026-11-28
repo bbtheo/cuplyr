@@ -56,19 +56,19 @@ Two \code{NA} key values are equal (one \code{NA} row survives), and so are two
 }
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  gpu_mtcars <- tbl_gpu(mtcars)
+gpu_mtcars <- tbl_gpu(mtcars)
 
-  # All columns as key, original row order preserved
-  result <- gpu_mtcars |> distinct() |> collect()
+# All columns as key, original row order preserved
+result <- gpu_mtcars |> distinct() |> collect()
 
-  # Key on specific columns, only those columns in the result
-  result <- gpu_mtcars |> distinct(cyl, gear) |> collect()
+# Key on specific columns, only those columns in the result
+result <- gpu_mtcars |> distinct(cyl, gear) |> collect()
 
-  # Key on specific columns, but keep every column (first row per key)
-  result <- gpu_mtcars |> distinct(cyl, .keep_all = TRUE) |> collect()
-}
+# Key on specific columns, but keep every column (first row per key)
+result <- gpu_mtcars |> distinct(cyl, .keep_all = TRUE) |> collect()
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link{mutate.tbl_gpu}} for creating new columns,
