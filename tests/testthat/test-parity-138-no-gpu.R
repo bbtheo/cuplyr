@@ -214,7 +214,8 @@ test_that("the startup message under the switch does not ask the device", {
     }
   )
   withr::local_envvar(CUPLYR_DISABLE_GPU = "true")
-  expect_message(.onAttach(dirname(p138_root()), "cuplyr"), "GPU")
+  # pkgload exports no dot-names, so reach the hook through the namespace.
+  expect_message(cuplyr:::.onAttach(dirname(p138_root()), "cuplyr"), "GPU")
   expect_false(called)
 })
 
@@ -446,7 +447,9 @@ test_that("a knitted vignette is plain Markdown with the output", {
   expect_identical(grep("^[ \t]*`{3,}[ \t]*\\{", lines, value = TRUE), character())
   expect_true(any(lines == "dplyr::pull(x, b)"))
   expect_true(any(lines == "#> [1] 2 4 6"))
-  expect_true(any(grepl("^#> Error.*expected138", lines)))
+  # knitr shows the error as R does (the message may be on the next line).
+  expect_true(any(grepl("^#> Error", lines)))
+  expect_true(any(grepl("^#> .*expected138", lines)))
   expect_true(any(lines == "not_run_138()"))
   expect_true(any(lines == "Some text."))
   expect_true(any(lines == "title: \"p138\""))
