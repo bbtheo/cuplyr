@@ -146,15 +146,26 @@ paths, and for round 2+ the reviewer's unresolved blocking findings verbatim.
 `FDIR/<NAME>/runs/round-<N>/`, the kind of round (below) and what to run.
 
 A **full round** runs:
-1. `tools/test-file` on the acceptance tests
-2. `tools/test` (full suite)
-3. `tools/perf`
-4. `tools/conformance <files>` for the conformance files named in the design,
+1. `tools/test-file` on the acceptance tests plus the existing test files for
+   the code the change touches (the coder names them in its report; add more
+   if you know of files that exercise the same code)
+2. `tools/perf`
+3. `tools/conformance <files>` for the conformance files named in the design,
    with `--ids` into the run dir
+
+It does not run the full suite: that is one run at the end (5.1). Add
+`tools/test` to a round when the change touches code many files depend on
+(`R/lower.R`, `R/execute.R`, `src/`, the helpers in `tests/testthat/helper-*.R`),
+or when a reviewer suspects a regression outside the named files. Why: the
+full suite takes 25 to 30 minutes even in parallel shards (about 42 minutes
+in one process), and its floor is the serial phase, the timing and memory
+files that must run alone one after another (about 20 minutes of it). Four
+rounds of it would hold the GPU for well over an hour; the targeted files in
+each round plus the full run at the end catch the same regressions.
 
 A **documentation-only round** runs only `tools/test-file` on the acceptance
 tests plus the test files the change touched or that check the changed text,
-and skips the full suite, perf and conformance. A round is documentation-only
+and skips perf and conformance (and the full suite, as in every round). A round is documentation-only
 when every change since the last full round (`git -C WT diff --stat
 <last-full-round-head>..HEAD`) is in: Markdown files, `vignettes/`, `NEWS.md`,
 `man/`, roxygen comments in `R/` (lines starting with `#'`, nothing else in the
@@ -165,8 +176,9 @@ changed, run `tools/document` first and commit its `man/` output; if
 `NAMESPACE` changes, the round is not documentation-only. Anything else, including
 `R/` code, `src/`, `configure`, `tools/`, `NAMESPACE` or package dependencies,
 needs a full round. The first round after a coder writes code is always full.
-The merge gate runs the full suite, perf and conformance before anything
-reaches `main`, so a documentation-only round loses no check. Say in the
+The full run in 5.1 and the merge gate (full suite, perf and conformance)
+come before anything reaches `main`, so a documentation-only round loses no
+check. Say in the
 tester prompt which kind of round it is and why, and record it in the round's
 log line.
 
@@ -204,6 +216,12 @@ Never weaken a test just to let the implementation pass.
 1. Bring the branch up to date: `git -C WT fetch origin main`, then
    `git -C WT merge origin/main`. Resolve conflicts yourself only if they're
    trivial, otherwise one more coder pass with a tester and reviewer check.
+   Then have a tester run the full suite (`tools/test --out RUN_DIR/suite.tsv`,
+   with `run_in_background` and waiting for it: 25 to 30 minutes) on the
+   final head, merge included, before anything is marked ready. A failure
+   there is handled as another round (coder on the failing tests, then
+   tester and reviewer); a failure that `origin/main` already has is not the
+   change's: say so in the pull request.
 2. Check that `NEWS.md` has a bullet under "development version" for
    anything a user can see: function name first, what the user can now do,
    and the issue number at the end, `(#<ISSUE>)`.
@@ -227,7 +245,8 @@ Never weaken a test just to let the implementation pass.
    two or three sentences on what changed for the user, the checklist ticked
    honestly, and the AI line ("AI tools were used", Claude Code agents under
    the maintainer's direction). Add a short "How it was tested" paragraph
-   with the tester's final counts (acceptance, suite, perf, conformance).
+   with the tester's final counts (acceptance, the full suite of 5.1, perf,
+   conformance).
    The pull request is public and self-contained for an outside reader: no
    local paths, agent ids, internal ids (`F124`, `N6`, "round 3") or round
    logs. Say what changed for a user and link related issues by number.

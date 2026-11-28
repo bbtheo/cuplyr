@@ -93,7 +93,7 @@ work around a block; if a rule stops legitimate work, say so in your report.
 | `tools/test-file <file>... [--out f.tsv]` | yes | Run specific test files. |
 | `tools/r '<R expr>'` | yes | Ad-hoc R with the package loaded and dplyr attached. |
 | `tools/document` | yes | Regenerate NAMESPACE, man/, Rcpp exports. |
-| `tools/test [--out f.tsv]` | yes | Full testthat suite. Tester agents only. |
+| `tools/test [--out f.tsv] [--shards N] [--record-durations f.tsv]` | yes | Full testthat suite: parallel shards inside the one lock hold (default 3, or `CUPLYR_TEST_SHARDS` / `--shards`), then each file in `tools/test-serial.txt` alone in its own process; 25 to 30 min, so run it in the background. Prints `[k] started <file>` lines while it runs, then the slowest files and a `PEAK:` line (GPU and host memory, per phase). `--shards 1` is the one-process run (about 42 min); `tools/test-durations.tsv` steers the split, refresh it with `--shards 1 --record-durations`. Tester agents only. |
 | `tools/perf [--out f.tsv]` | yes | Perf gate (`CUPLYR_PERF=1`, max ratio 1.5 vs the main checkout's baseline). Tester agents only. |
 | `tools/perf-baseline-set [--baseline f] <id>=<s>...` | merge.lock | Raise (or lower) perf baseline entries by hand. Theo only; `tools/merge-queue` runs `tools/perf-ratchet` itself. |
 | `tools/conformance [files] [--ids f.tsv] [--report f.md]` | yes | dplyr's own vendored test suite run against `tbl_gpu`. Tester agents only. |
@@ -117,6 +117,12 @@ terminal in the main checkout.
   pipeline, ...)` / `expect_same_as_dplyr_lazy()` (`tests/testthat/helper-oracle.R`).
   Use `arrange_by =` only where dplyr itself doesn't define row order.
 - Compare eager and lazy results through `tibble::as_tibble()`.
+- The suite runs in parallel shards (several R processes at once). A new test
+  file that asserts a wall-clock time, asserts GPU memory amounts or needs
+  >= 1 GB free (a `skip_if_insufficient_gpu_memory()` skip would hide a result
+  beside the shards), or reads the process's memory-resource configuration goes
+  on `tools/test-serial.txt` with a `# reason`. Never use the list to hide a file
+  that only passes alone or in a particular order: report that as a bug.
 - `test-memory-regression.R` measures GPU memory deltas and is sensitive to
   other GPU activity; that is one reason everything runs under the lock.
 
@@ -130,7 +136,7 @@ Roles (definitions in `.claude/agents/`, orchestrator procedure in
 | Orchestrator | Opus (main session) | Dispatches PMs in board order, keeps the board status and the local run state, opens follow-up issues, writes post-mortems, runs the merge queue. |
 | `pm` | Opus | One feature in its own worktree. Writes the acceptance tests, then drives coder -> tester -> reviewer rounds. |
 | `coder` | Sonnet (rounds 1-2), Opus (rounds 3-4) | Writes the code. Can't touch the PM's acceptance tests. Runs only targeted test files. |
-| `tester` | Haiku | Runs the full suite, perf and conformance; writes logs; reports facts only. |
+| `tester` | Haiku | Runs the test files, perf and conformance the PM lists, and the full suite once on the final head; writes logs; reports facts only. |
 | `reviewer` | Opus | Adversarial review of diff and logs. Never runs code; asks a tester instead. |
 
 How one feature moves:

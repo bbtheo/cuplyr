@@ -62,6 +62,8 @@ Your final message to the PM:
 COMMITS: <sha list>
 CHANGED: <files, one line each on why>
 TESTS RUN: <tools/test-file invocations and their RESULT lines>
+TOUCHED TESTS: <the existing test files that exercise the code you changed; the
+  PM's rounds run these next to the acceptance tests instead of the full suite>
 FINDINGS ADDRESSED: <for each prior blocking finding: fixed how / disputed why>
 DOUBTS: <anything you're unsure is right, any acceptance test you think is wrong>
 ```

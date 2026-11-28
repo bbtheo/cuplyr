@@ -1,0 +1,56 @@
+# Test files that run alone, after the parallel shards have finished, each in
+# a fresh R process, one after another (tools/run-tests.R suite). One file name
+# per line; '#' starts a comment.
+#
+# A file belongs here when its result depends on what else runs on the machine
+# at the same time: it asserts a wall-clock time, it asserts GPU memory amounts
+# or needs gigabytes free (a test that skips for lack of memory would skip
+# silently next to the shards), or it reads the memory-resource configuration
+# of its own process (the shards run with a smaller pool, see CONTRIBUTING.md).
+# It is not a place to hide a file that only passes in a particular order: a
+# file that fails in a shard but passes here has a bug to fix or report.
+#
+# New file that times something against a bound (timing_medians(),
+# timing_retry(), a bound on elapsed time), asserts GPU memory amounts, or
+# needs >= 1 GB free? Add it here with the reason.
+
+# --- asserts GPU memory amounts, or needs gigabytes free --------------------------
+test-memory-regression.R        # GPU memory deltas of verbs; the regression gate for leaks
+test-gpu-memory.R               # GPU memory deltas and device-level reads; needs 2 GB free
+test-parity-F65-async.R         # GB-sized tables, bytes returned to the device, pool and release threshold
+test-F57-round2.R               # the real pool against the card's free memory; reloads the resource
+test-parity-F57-pool.R          # pool sizes: the initial reservation and device-level used >= pool
+test-parity-78-robust-tests.R   # a 1 GB table and "needs 3 GB free"; scans every test file
+test-parity-F58-free.R          # skips below 2 GB free: a skip next to the shards would hide a result
+test-parity-F61-group-split-memory.R  # skips below 1.5 GB free
+test-parity-50-memory.R         # skips below 1 GB free; memory-bound timings
+test-F58-scope.R                # skips below 1 GB free; bounds a call at 1 s
+
+# --- reads the memory-resource configuration of its own process -------------------
+test-parity-F93-options.R       # option parsing at load, the computed pool_initial default
+test-F93-options-extra.R        # the same, plus timing_medians()
+
+# --- asserts wall-clock time -------------------------------------------------------
+test-75-many-dots.R             # timing_medians()
+test-parity-75-perf-gaps.R      # timing_medians()
+test-parity-F00-gate.R          # perf_time() resolution against timing_spin(), perf gate calibration
+test-parity-F106-timing.R       # the timing helper's own tests (timing_medians(), timing_retry())
+test-parity-F110-verb-cost.R    # timing_medians()
+test-parity-F18-factor-rule.R   # timing_medians()
+test-parity-F59-median.R        # timing_medians()
+test-parity-F59-rolling.R       # timing_medians()
+test-parity-F60-colwise-wide.R  # timing_medians()
+test-parity-F61-group-split.R   # timing_medians()
+test-parity-F61-recode.R        # timing_medians()
+test-parity-F68a-lazy-speed.R   # timing_medians(), timing_retry()
+test-parity-F68b-floor.R        # timing_medians(), timing_retry()
+test-parity-F99-barrier-prune.R # timing_medians()
+test-parity-F52-perf-time.R     # perf_time() batch sizing against sleeping closures
+test-parity-F40-name-builders.R # a call's time against 5x another call's
+test-parity-F64-observe.R       # perf calibration probes and recorded observations
+test-parity-F121-lib.R          # other processes' CPU load from /proc/stat
+test-parity-F121-extras.R       # the cap on a timed call; bounds on the gap between calls
+test-gpu-info.R                 # has_gpu() under 1 s; device free memory
+test-dplyr-glimpse.R            # glimpse() of a large lazy table under 5 s
+test-parity-F49-rowwise-rewrites.R  # a rowwise rewrite under 5 s
+test-parity-F66-median-exact.R  # roll_median() of 1e6 rows under 2 s
