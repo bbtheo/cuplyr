@@ -4,13 +4,17 @@
 #   tools/check [--out DIR] [R CMD check args...]
 #
 # Builds the source tarball with scripts/build-tarball.sh, then runs
-# R CMD check on it with the same settings as `pixi run check`
-# (_R_CHECK_FORCE_SUGGESTS_=false, --no-manual --ignore-vignettes); extra
+# R CMD check on it with the check settings of `pixi run check`
+# (_R_CHECK_FORCE_SUGGESTS_=false, --no-manual --ignore-vignettes), plus the
+# deprecation switch below, which that task does not set; extra
 # arguments go to R CMD check (e.g. --as-cran). The check installs the package
 # only into its own DIR/cuplyr.Rcheck/ library, never into a user or site
 # library. DIR defaults to scratchpad/check/ in this worktree (gitignored); the
 # log is DIR/cuplyr.Rcheck/00check.log and the tests' output
 # DIR/cuplyr.Rcheck/tests/testthat.Rout(.fail).
+#
+# The install compiles with CUPLYR_WERROR_DEPRECATED=1 (deprecated declarations
+# are errors); set it to 0 to check without.
 source "$(dirname "$0")/lib.sh"
 cd "$CUPLYR_WT_ROOT"
 
@@ -19,6 +23,7 @@ if [[ "${1:-}" == "--out" ]]; then
   out="$2"
   shift 2
 fi
+export CUPLYR_WERROR_DEPRECATED="${CUPLYR_WERROR_DEPRECATED:-1}"
 mkdir -p "$out"
 out="$(cd "$out" && pwd)"
 

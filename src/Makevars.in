@@ -18,6 +18,10 @@ RAPIDS_RPATHS=@RAPIDS_RPATHS@
 # the legacy-interface switch is not defined.
 # IMPORTANT: CUDF/RMM/CCCL includes MUST come before CUDA_INCLUDE to use matching CCCL headers
 PKG_CPPFLAGS=-DLIBCUDACXX_ENABLE_EXPERIMENTAL_MEMORY_RESOURCE $(if $(CCCL_INCLUDE),-I$(CCCL_INCLUDE),) -I$(CUDF_INCLUDE) -I$(RMM_INCLUDE) -I$(CUDA_INCLUDE)
+# The deprecation flag below is empty unless configure ran with
+# CUPLYR_WERROR_DEPRECATED=1, then -Werror=deprecated-declarations: a call to a
+# deprecated declaration fails the compile. Deprecations are never silenced.
+PKG_CXXFLAGS=@WERROR_DEPRECATED_FLAG@
 PKG_LIBS=-L$(CUDF_LIB) -Wl,--enable-new-dtags -Wl,-rpath,$(RAPIDS_RPATHS) -lcudf -L$(CUDA_DRIVER_LIB) $(CUDA_DRIVER_RPATH_FLAG) -lcuda -L$(CUDA_RUNTIME_LIB) -Wl,-rpath,$(CUDA_RUNTIME_LIB) -lcudart
 
 # C++ standard (libcudf 26.x requires C++20)

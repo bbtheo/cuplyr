@@ -5,6 +5,8 @@
 #   tools/merge-gate <out-dir>
 #
 # Passes only if ALL of:
+#   0. tools/check-deprecations: a fresh build with calls to any deprecated
+#      declaration as errors compiles (CPU-only, runs first)
 #   1. the testthat suite has no fail/error
 #   2. the perf gate passes against the main checkout's perf_baseline.json
 #      (each benchmark's calibrated median goes to $out/perf_observations.tsv,
@@ -35,6 +37,19 @@ baseline="$CUPLYR_PARITY_DIR/conformance_baseline.tsv"
 ok=1
 summary="$out/summary.txt"
 : > "$summary"
+
+# The check's own verdict line says why (and which libcudf it compiled against).
+if tools/check-deprecations > "$out/deprecations.log" 2>&1; then
+  grep -E '^deprecations: PASS' "$out/deprecations.log" >> "$summary" \
+    || echo "deprecations: PASS" >> "$summary"
+else
+  ok=0
+  grep -E '^deprecations: FAIL' "$out/deprecations.log" >> "$summary" \
+    || echo "deprecations: FAIL (no verdict; see deprecations.log)" >> "$summary"
+  # The call sites, so the posted result names them (capped for a long port).
+  grep -E ': error: .*\[-Werror=deprecated-declarations\]' "$out/deprecations.log" \
+    | awk '!seen[$0]++' | head -n 20 >> "$summary" || true
+fi
 
 if Rscript tools/run-tests.R suite --out "$out/suite.tsv" > "$out/suite.log" 2>&1; then
   echo "suite: PASS" >> "$summary"

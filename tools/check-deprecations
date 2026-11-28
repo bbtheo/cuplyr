@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# Fail if the C++ sources call a deprecated declaration (no GPU, no lock).
+#
+#   tools/check-deprecations [--src DIR] [--log FILE]
+#
+# Copies DIR's package sources (default: this worktree) to a temp dir and
+# compiles every translation unit from scratch with CUPLYR_WERROR_DEPRECATED=1,
+# so a call to a deprecated declaration is a compile error with its file:line.
+# Nothing is installed and nothing is written into DIR. make runs with -k, so
+# one run lists every call site.
+#
+# The check fails on ANY deprecated declaration reached from a non-system
+# header, not only libcudf/RMM ones: an R, Rcpp or CUDA deprecation turns it
+# red too. Port the call (src/cuplyr_compat.hpp holds the version-dependent
+# ones); never silence it. A deprecated *header* (#pragma GCC warning, as
+# CCCL's <cuda/stream_ref> is on RAPIDS 26.02) is shown in the summary but is
+# not fatal.
+#
+# A PASS also needs proof that the check checked something: every compile
+# command carries -Werror=deprecated-declarations and no later flag cancels it
+# (-w, -Wno-deprecated-declarations, ... from a user Makevars), and configure
+# found the active environment's libcudf (a valid CUDF_HOME wins over
+# CONDA_PREFIX, which would check another RAPIDS release).
+#
+# The summary after the build output lists the compiler's deprecation warnings
+# and errors. --log FILE also gets the full compiler output. Runs in the pixi
+# environment CUPLYR_PIXI_ENV selects, so
+# `CUPLYR_PIXI_ENV=rapids2602 tools/check-deprecations` checks RAPIDS 26.02.
+# The pre-merge gate runs this.
+source "$(dirname "$0")/lib.sh"
+
+usage() { echo "usage: tools/check-deprecations [--src DIR] [--log FILE]" >&2; exit 2; }
+# Bad input: say so in the verdict's own words, and exit 2.
+bad_input() { echo "deprecations: FAIL ($1)"; exit 2; }
+
+src="$CUPLYR_WT_ROOT"; log=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --src) [[ $# -ge 2 ]] || usage; src="$2"; shift 2 ;;
+    --log) [[ $# -ge 2 ]] || usage; log="$2"; shift 2 ;;
+    *) usage ;;
+  esac
+done
+[[ -d "$src" ]] || bad_input "--src $src is not a directory"
+src="$(cd "$src" && pwd)"
+for need in DESCRIPTION NAMESPACE configure src; do
+  [[ -e "$src/$need" ]] || bad_input "$src has no $need: not a package source tree"
+done
+if [[ -n "$log" ]]; then
+  log="$(realpath -m "$log")"
+  : > "$log" || bad_input "cannot write --log $log"
+fi
+cuplyr_activate_env
+
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+tar -C "$src" -cf - --exclude='*.o' --exclude='*.so' --exclude=src/Makevars \
+  --exclude=src/.cuplyr-build-env DESCRIPTION NAMESPACE configure src | tar -C "$tmp" -xf -
+
+# R CMD INSTALL (inside compile_dll) runs ./configure itself, with this switch.
+export CUPLYR_WERROR_DEPRECATED=1
+export MAKEFLAGS="$MAKEFLAGS -k"
+build_log="$tmp/build.log"
+
+cd "$tmp"
+# The build output is shown as it comes, kept in $build_log for the summary
+# and copied to --log. rc is the build's own exit status, not tee's.
+set +e
+Rscript -e 'pkgbuild::compile_dll(".", debug = FALSE, quiet = FALSE)' 2>&1 \
+  | tee "$build_log" ${log:+"$log"}
+rc=${PIPESTATUS[0]}
+set -e
+
+# What the compiler said about deprecations: warning and error lines only, once
+# each (a header's own line repeats for every translation unit that includes it).
+echo "--- deprecation diagnostics ---"
+diagnostics="$(grep -iE ': (warning|error): .*deprecated' "$build_log" | awk '!seen[$0]++' || true)"
+if [[ -n "$diagnostics" ]]; then echo "$diagnostics"; else echo "(none)"; fi
+
+# The libcudf configure chose must be the active environment's: otherwise
+# CUPLYR_PIXI_ENV=rapids2602 could check 26.10 (or a stale pip wheel) and pass.
+cudf_prefix="$(sed -n 's/^Found libcudf at: //p' "$build_log" | tail -n 1)"
+if [[ -n "$cudf_prefix" && -n "${CONDA_PREFIX:-}" ]] && ! [[ "$cudf_prefix" -ef "$CONDA_PREFIX" ]]; then
+  echo "configure used the libcudf at $cudf_prefix; the active environment is $CONDA_PREFIX."
+  echo "deprecations: FAIL (configure used a libcudf outside the active environment; a valid CUDF_HOME takes precedence, so unset it)"
+  exit 1
+fi
+
+if [[ $rc -ne 0 ]]; then
+  n_calls="$(grep -ciE ': error: .*deprecated' <<< "$diagnostics" || true)"
+  if [[ $n_calls -gt 0 ]]; then
+    echo "deprecations: FAIL ($n_calls calls to deprecated declarations, listed under 'deprecation diagnostics')"
+  else
+    echo "deprecations: FAIL (the build failed; see the output above)"
+  fi
+  exit "$rc"
+fi
+if [[ -z "$cudf_prefix" ]]; then
+  echo "deprecations: FAIL (configure did not say which libcudf it found, so the RAPIDS release checked is unknown)"
+  exit 1
+fi
+
+# A PASS must mean the flag was on. Every compile line has to carry it; if one
+# doesn't (configure or Makevars.in lost the switch, or a user Makevars
+# overrides the flags), the run proved nothing.
+compile_lines="$(grep -E ' -c [^ ]+\.(cpp|cc|cxx) ' "$build_log" || true)"
+if [[ -z "$compile_lines" ]]; then
+  echo "deprecations: FAIL (no compile command in the build output, so nothing was checked)"
+  exit 1
+fi
+if grep -qvF -- '-Werror=deprecated-declarations' <<< "$compile_lines"; then
+  echo "deprecations: FAIL (a compile command lacks -Werror=deprecated-declarations: configure, src/Makevars.in or a user Makevars dropped the switch)"
+  exit 1
+fi
+# The last of conflicting -W flags wins, and -w drops every warning wherever it
+# is. -Wno-deprecated, -Wno-error=deprecated and -Wno-error don't cancel it in
+# GCC but do (or may) in clang, so they count too. Unrelated ones such as
+# -Wno-deprecated-copy don't.
+cancel="$(awk '{
+  last = 0
+  for (i = 1; i <= NF; i++) if ($i == "-Werror=deprecated-declarations") last = i
+  for (i = 1; i <= NF; i++)
+    if ($i == "-w" || (i > last && $i ~ /^-Wno-(error(=deprecated(-declarations)?)?|deprecated(-declarations)?|everything)$/)) print $i
+}' <<< "$compile_lines" | awk '!seen[$0]++' | paste -sd' ' -)"
+if [[ -n "$cancel" ]]; then
+  echo "deprecations: FAIL (a compile command cancels -Werror=deprecated-declarations with $cancel: drop it from the compiler flags, e.g. CXX20FLAGS in ~/.R/Makevars)"
+  exit 1
+fi
+cudf_version="$(sed -n 's/^Found libcudf version: //p' "$build_log" | tail -n 1)"
+echo "deprecations: PASS (no deprecated declaration is called; libcudf ${cudf_version:-version unknown})"
