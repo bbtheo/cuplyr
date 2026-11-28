@@ -482,6 +482,48 @@ test_that("options a vignette sets don't outlive its knit", {
   expect_identical(getOption("cuplyr.exec_mode"), mode)
 })
 
+test_that("cuplyr_knit_vignettes() knits each source in its own R session", {
+  # Each shipped vignette shows what a fresh session prints, not state left
+  # over from the vignette knitted before it.
+  skip_if_no_gpu()
+  p138_skip_if_no_source_tree()
+  lib <- p138_lib()
+  dir <- withr::local_tempdir("p138-")
+  setup <- c(
+    "```{r, include = FALSE}",
+    "knitr::opts_chunk$set(collapse = TRUE, comment = \"#>\")",
+    "```",
+    ""
+  )
+  writeLines(c(
+    "---", "title: \"a\"", "---", "", setup,
+    "```{r}",
+    "assign(\"p138_shared\", 1, envir = globalenv())",
+    "options(cuplyr.p138_shared = TRUE)",
+    "```"
+  ), file.path(dir, "a.Rmd.orig"))
+  writeLines(c(
+    "---", "title: \"b\"", "---", "", setup,
+    "```{r}",
+    "exists(\"p138_shared\", envir = globalenv())",
+    "is.null(getOption(\"cuplyr.p138_shared\"))",
+    "cuplyr::has_gpu()",
+    "```"
+  ), file.path(dir, "b.Rmd.orig"))
+
+  lib$cuplyr_knit_vignettes(dir = dir, pkg = p138_root())
+
+  expect_true(file.exists(file.path(dir, "a.Rmd")))
+  b <- readLines(file.path(dir, "b.Rmd"), warn = FALSE)
+  after <- function(code) b[match(code, b) + 1L]
+  expect_identical(after("exists(\"p138_shared\", envir = globalenv())"), "#> [1] FALSE")
+  expect_identical(after("is.null(getOption(\"cuplyr.p138_shared\"))"), "#> [1] TRUE")
+  expect_identical(after("cuplyr::has_gpu()"), "#> [1] TRUE")
+  # Nor did it run in this process.
+  expect_false(exists("p138_shared", envir = globalenv()))
+  expect_null(getOption("cuplyr.p138_shared"))
+})
+
 test_that("the shipped vignettes are up to date with their sources", {
   # Knits every source on the GPU and compares everything but the output
   # lines (memory and timings differ between runs) with the shipped file.
