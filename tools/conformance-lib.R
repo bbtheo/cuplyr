@@ -80,13 +80,26 @@
 # names, types, row count and grouping are always compared.
 # expect_s3_class(<tbl_gpu result>, "data.frame", exact = TRUE) follows the same
 # rule (review N6): it is a HARNESS RELAXATION, and it turns e.g. arrange's
-# "preserves input class" into a pass.
+# "preserves input class" into a pass. With a subclass in front (see `class<-`)
+# the relaxed class is c(<subclass>, "data.frame"), as class() reports it.
+# expect_s3_class() also puts the tbl_gpu's extra classes in front of the
+# collected class, as class() does (collect() never carries them), so a test
+# that prepended a subclass sees it, and one that doesn't expect it fails.
 #
 # class() in the shim env reports the class collect() gives a tbl_gpu (a bare
 # data.frame stays one; grouped_df when grouped), or the class of the fixture for
 # the uploaded object itself, so `expect_s3_class(out, class(df), exact = TRUE)`
 # keeps its meaning. A result that collects to a tibble from a bare data.frame
 # fixture fails such a test honestly.
+#
+# `class<-` in the shim env is the inverse of that class(): a test that writes
+# `class(x) <- c("myclass", class(x))` on a tbl_gpu means "add a subclass", so
+# the classes in front of what class() reported go in front of the tbl_gpu's own
+# class (c("myclass", "tbl_gpu", "tbl")), and class() then reports them in front
+# of its previous report. Without it the assignment would write the collected
+# class (grouped_df, ...) onto the tbl_gpu and corrupt it. Any other assignment
+# (a plain object, NULL, a value that doesn't end with the reported class) is
+# base R's.
 #
 # expect_warning()/expect_no_warning() compute a lazy tbl_gpu value inside the
 # expectation, so a warning raised when the result is computed (the many-to-many
@@ -497,6 +510,13 @@ cf_as_bare <- function(x) {
   if (identical(class(x), c("tbl_df", "tbl", "data.frame"))) as.data.frame(x) else x
 }
 
+# The classes a tbl_gpu carries in front of "tbl_gpu" (a test's
+# `class(x) <- c("sub", class(x))`, see `class<-` in cf_make_shim_env()).
+cf_extra_classes <- function(x) {
+  own <- base::class(x)
+  own[seq_len(match("tbl_gpu", own) - 1L)]
+}
+
 # Normalize both operands of a comparison. The only relaxation: when exactly
 # one side is a tbl_gpu and the other is a bare data.frame, the collected side
 # is compared as a bare data.frame (the harness uploaded a data.frame fixture;
@@ -659,15 +679,30 @@ cf_make_shim_env <- function(state, upload = TRUE) {
       fixture <- cf_fixture_class(state, x)
       is_fixture <- !is.null(fixture) &&
         length(.subset2(x, "groups")) == 0L && is.null(.subset2(x, "lazy_ops"))
+      # classes the tbl_gpu carries in front of "tbl_gpu" (see `class<-`)
+      extra <- cf_extra_classes(x)
       if (is_fixture) {
-        return(fixture)
+        return(c(extra, fixture))
       }
       # what collect() gives it: it restores grouping, rowwise and the bare
       # data.frame class (cf_collect() is for comparisons and always a tibble)
       got <- tryCatch(dplyr::collect(x), error = function(e) NULL)
-      return(base::class(if (is.null(got)) cf_collect(x) else got))
+      return(c(extra, base::class(if (is.null(got)) cf_collect(x) else got)))
     }
     base::class(x)
+  }
+
+  # The inverse of `class` above, for `class(x) <- c("sub", class(x))`.
+  env$`class<-` <- function(x, value) {
+    if (inherits(x, "tbl_gpu")) {
+      reported <- env$class(x)
+      n <- length(reported)
+      k <- length(value)
+      if (k >= n && identical(as.character(value[(k - n + 1L):k]), reported)) {
+        value <- c(value[seq_len(k - n)], base::class(x))
+      }
+    }
+    base::`class<-`(x, value)
   }
 
   # Harness-only column accessors (dplyr tests extract columns with `$`/`[[`
@@ -724,10 +759,19 @@ cf_make_shim_env <- function(state, upload = TRUE) {
   env$expect_s3_class <- function(object, class, ..., exact = FALSE) {
     # The one thing checked on the raw object: that it is a tbl_gpu.
     o <- if (inherits(object, "tbl_gpu") && all(class == "tbl_gpu")) object else cf_normalize(object)
-    # Same rule as expect_equal(): a result compared against exactly a bare
-    # data.frame class is compared as the bare data.frame (the tibble class of
-    # a collected result is a harness artifact, the fixture was a data.frame).
-    if (inherits(object, "tbl_gpu") && isTRUE(exact) && identical(class, "data.frame")) o <- cf_as_bare(o)
+    if (inherits(object, "tbl_gpu") && !all(class == "tbl_gpu")) {
+      # Same rule as class(): the classes the tbl_gpu carries in front of
+      # "tbl_gpu" come in front of the collected class (collect() never carries
+      # them), so a test that prepended a subclass sees it. When collect()
+      # failed, `o` is still the raw tbl_gpu and already carries them.
+      extra <- cf_extra_classes(object)
+      # Same rule as expect_equal(): a result compared against exactly a bare
+      # data.frame class is compared as the bare data.frame (the tibble class of
+      # a collected result is a harness artifact, the fixture was a data.frame).
+      # With a subclass, class() reports it in front of "data.frame".
+      if (isTRUE(exact) && identical(class, c(extra, "data.frame"))) o <- cf_as_bare(o)
+      if (length(extra) > 0L && !inherits(o, "tbl_gpu")) base::class(o) <- c(extra, base::class(o))
+    }
     testthat::expect_s3_class(o, class, ..., exact = exact)
   }
   cf_label <- function(e) paste(deparse(e, width.cutoff = 60L)[1], collapse = "")
