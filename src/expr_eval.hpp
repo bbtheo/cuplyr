@@ -2915,6 +2915,16 @@ inline std::unique_ptr<cudf::column> apply_handler(Rcpp::List node, eval_ctx& ct
                 haystack = character_to_gpu(v);
                 break;
             }
+            // #74: an integer64 set (int64 bits; INT64_MIN is its NA) beside an
+            // INT64 x, matched exactly
+            case cudf::type_id::INT64: {
+                const int64_t* bits = reinterpret_cast<const int64_t*>(REAL(set_value));
+                for (R_xlen_t i = 0; i < Rf_xlength(set_value); ++i) {
+                    if (bits[i] == std::numeric_limits<int64_t>::min()) set_has_na = true;
+                }
+                haystack = int64_to_gpu(set_value);
+                break;
+            }
             case cudf::type_id::BOOL8: {
                 Rcpp::LogicalVector v(set_value);
                 for (R_xlen_t i = 0; i < v.size(); ++i) {

@@ -701,6 +701,15 @@ filter_run <- function(.data, dots, by_quo, .preserve, complement, call) {
                                     inline = inline))
     }
 
+    # (#74) a min()/max() with na.rm = TRUE warns for a group with no value left,
+    # naming the predicate: dplyr's call, until a filter can say it
+    if (any(vapply(unlist(lapply(plan$stages, `[[`, "specs"), recursive = FALSE), narm_minmax_spec,
+                   logical(1)))) {
+      return(filter_window_fallback(fallback_data, fallback_dots, by_quo, .preserve, complement,
+                                    inline = inline,
+                                    reason = "a min()/max() with na.rm = TRUE in a filter() predicate."))
+    }
+
     # A non-logical predicate must raise dplyr's own "`..1` must be a logical
     # vector" error (filter_out()'s cudf NOT would even accept numerics).
     # Judge each window dot by its rewritten predicate's type, before any

@@ -21,6 +21,9 @@ std::unique_ptr<cudf::column> numeric_to_gpu(Rcpp::NumericVector x);
 // Create GPU column from R integer vector (INT32, NA -> null)
 std::unique_ptr<cudf::column> integer_to_gpu(Rcpp::IntegerVector x);
 
+// Create GPU column from a bit64::integer64 vector (INT64, int64 bits, NA -> null)
+std::unique_ptr<cudf::column> int64_to_gpu(SEXP x);
+
 // Create GPU column from R character vector (STRING, NA -> null)
 std::unique_ptr<cudf::column> character_to_gpu(Rcpp::CharacterVector x, const char* col_name = nullptr);
 

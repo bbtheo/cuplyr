@@ -595,9 +595,10 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
         // column.
         for (int si : rank_spec_indices) {
             const WindowSpec& sp = specs[static_cast<size_t>(si)];
-            if (order_idx_r.size() != 1 || sp.value_idx != order_idx_r[0]) {
+            if (order_idx_r.size() < 1 || sp.value_idx != order_idx_r[0] ||
+                (order_idx_r.size() > 1 && sp.fn != "row_number")) {
                 Rcpp::stop("gpu_window: internal: rank spec's value column must equal "
-                           "the frame's sole order column (fn = '%s')", sp.fn.c_str());
+                           "the frame's first order column (fn = '%s')", sp.fn.c_str());
             }
         }
 
@@ -687,8 +688,10 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                 const WindowSpec& sp = specs[static_cast<size_t>(si)];
                 ScanJob job{si, -1, -1, false};
 
-                // The ranked column is this frame's sole order column (just
-                // checked above), so its cudf::order/null_order are exactly
+                // The ranked column is this frame's first order column (just
+                // checked above; #74: row_number(x) under an order_by() has the
+                // order columns after it, which only break x's ties through the
+                // sort), so its cudf::order/null_order are exactly
                 // `order_col_orders[0]` / `order_col_null_precs[0]` -- the
                 // SAME (possibly direction-flipped, nulls-last) null
                 // precedence step 1's physical sort used for this column.
@@ -892,8 +895,9 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
             auto agg_value_view = [&](const WindowSpec& sp) {
                 cudf::size_type vpos = value_pos.at(sp.value_idx);
                 cudf::column_view v = work_view.column(vpos);
+                // (#74) mean(x, na.rm = TRUE) drops a NaN too (is.na())
                 if (sp.fn != "min" && sp.fn != "max" && sp.fn != "median" &&
-                    sp.fn != "sd" && sp.fn != "var") {
+                    sp.fn != "sd" && sp.fn != "var" && !(sp.fn == "mean" && sp.na_rm)) {
                     return v;
                 }
                 auto it = nan_agg_copy.find(vpos);
@@ -1038,7 +1042,9 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                 bool na_propagates = sp.fn == "mean" || sp.fn == "sum" || sp.fn == "min" ||
                                       sp.fn == "max" || sp.fn == "sd" || sp.fn == "var" ||
                                       sp.fn == "median";
-                if (!na_propagates || (sp.na_rm && ts_targets.count(si))) {
+                // na.rm = TRUE (Date/POSIXct mean()/median(), and #74's mean()/
+                // min()/max()): cudf already skips the nulls
+                if (!na_propagates || sp.na_rm) {
                     continue;
                 }
 
@@ -1075,6 +1081,22 @@ SEXP gpu_window(SEXP xptr, Rcpp::List frames, Rcpp::IntegerVector group_indices)
                 auto null_scalar = cudf::make_empty_scalar_like(spec_results[static_cast<size_t>(si)]->view());
                 spec_results[static_cast<size_t>(si)] = cudf::copy_if_else(
                     *null_scalar, spec_results[static_cast<size_t>(si)]->view(), has_any_null->view());
+            }
+
+            // (#74) na.rm = TRUE of a double: a group with no value left (cudf: null)
+            // is NaN for mean(), -Inf for max(), Inf for min(), as in R.
+            for (int si : agg_spec_indices) {
+                const WindowSpec& sp = specs[static_cast<size_t>(si)];
+                auto& res = spec_results[static_cast<size_t>(si)];
+                if (!sp.na_rm || ts_targets.count(si) || res->type().id() != cudf::type_id::FLOAT64 ||
+                    !(sp.fn == "mean" || sp.fn == "min" || sp.fn == "max")) {
+                    continue;
+                }
+                double fill = sp.fn == "mean" ? std::numeric_limits<double>::quiet_NaN()
+                            : sp.fn == "min" ? std::numeric_limits<double>::infinity()
+                                             : -std::numeric_limits<double>::infinity();
+                cudf::numeric_scalar<double> fill_scalar(fill, true);
+                res = cudf::replace_nulls(res->view(), fill_scalar);
             }
 
             // F41: back to Date / POSIXct (ts_agg.hpp).

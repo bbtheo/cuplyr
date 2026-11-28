@@ -90,7 +90,9 @@
 #'     days, lubridate's `year()`, `month()`, `day()`, `hour()`, `minute()`,
 #'     `second()`, `quarter()`, `yday()`, `wday()`, `floor_date()`,
 #'     `ceiling_date()` and `round_date()`, and `as.Date()`/`as.POSIXct()`,
-#'     for the arguments the GPU supports; other forms run on the CPU
+#'     for the arguments the GPU supports; other forms run on the CPU.
+#'     `year()`, `month()`, `yday()` and `wday()` are doubles, as in
+#'     lubridate (`day()`, `quarter()`, `hour()`, `minute()` are integers)
 #'   \item A factor column compared with a label (`f == "a"`, `f %in%
 #'     c("a", "b")`, and `<`, `>`, ... for an ordered factor), and
 #'     `as.character()`, `as.integer()` or `as.numeric()` of a factor column
@@ -196,7 +198,14 @@
 #'         follow R's `na.rm = FALSE` default (any `NA` in the group
 #'         makes that group's result `NA`); `n()` always counts every
 #'         row regardless of `NA`s, and `n_distinct()` counts `NA` as a
-#'         value. `median()` runs on the GPU for a double, `Date` or
+#'         value. `mean(x, na.rm = TRUE)` of a logical, integer or double
+#'         drops `NA` and `NaN` (a group with none left is `NaN`), and so
+#'         does `min()`/`max(x, na.rm = TRUE)` of a double (a group with none
+#'         left is `Inf`/`-Inf`, with dplyr's warning); `min()`/`max(x,
+#'         na.rm = TRUE)` of an integer or logical runs on the CPU, because
+#'         dplyr makes the whole column a double when some group has no value
+#'         left. `median()`, `sd()` and `var()` with `na.rm = TRUE` run on the
+#'         CPU. `median()` runs on the GPU for a double, `Date` or
 #'         `POSIXct` column (of an integer or logical one, on the CPU), and
 #'         `min()`/`max()` of a string column under the collation rule of the
 #'         comparisons above. On the GPU, `mean()` and `median()` of a `Date`
@@ -229,6 +238,8 @@
 #'         and `cummean()`/`cumall()`/`cumany()`/`consecutive_id()`),
 #'         the rank functions that depend only on the values
 #'         (`min_rank()`, `dense_rank()`, ... are unaffected by the order),
+#'         `row_number(x)` and `ntile(x, n)` (the ties of `x` are broken by
+#'         the order, then by row),
 #'         and an elementwise call whose other arguments are scalars
 #'         (`order_by(o, cumsum(x) * 2)` is `cumsum(x) * 2`: the window
 #'         inside the first argument runs in row order, as in dplyr).
@@ -236,7 +247,6 @@
 #'         dplyr's value or error: `roll_median()`, an elementwise call with
 #'         another column argument (`order_by(o, cumsum(x) + lag(x))`), a
 #'         `NULL` or empty extra argument (`lag(x, default = NULL)`),
-#'         `row_number(x)`/`ntile(x, n)` (ties broken by the order),
 #'         `first()`/`last()`/`nth()`, aggregates, a nested `order_by()` as
 #'         the wrapped call itself (`order_by(o, order_by(i, cumsum(x)))`;
 #'         nested inside the first argument it stays on the GPU), and shapes
@@ -300,8 +310,11 @@
 #' `options(cuplyr.fallback = "warn")` to be told when; see
 #' [cuplyr-fallback]). So does an argument type for which the GPU would not
 #' give R's result, for example `cummax()` of a logical column, or `sum()`,
-#' `mean()`, `min()` or `max()` of an integer64 column. Among the other
-#' cases:
+#' `mean()`, `min()` or `max()` of an integer64 column (an integer64 column
+#' stays on the GPU for comparisons, `is.na()`, the rank functions,
+#' `first()`/`last()`/`nth()`, `n_distinct()`, `lag()`/`lead()` with an
+#' integer64 or integer `default`, and `%in%` an integer64 or integer vector;
+#' `%in%` a double vector runs on the CPU). Among the other cases:
 #' \itemize{
 #'   \item `order_by()`/`with_order()` with a general expression as the
 #'     ordering argument (only a bare column, `desc(column)`, or `-column`
@@ -723,7 +736,8 @@ mutate_run <- function(.data, dots, by_quo, .keep, before_quo, after_quo, rowwis
     return(mutate_done(mutate_window(
       .data, fallback_dots, expressions, orig_schema, orig_names, orig_groups,
       .keep, before_quo, after_quo, by_quo, fallback_data = fallback_data,
-      drop = staged_temps, dropped = dropped, fractional = fractional, minmax = mm
+      drop = staged_temps, dropped = dropped, fractional = fractional, minmax = mm,
+      origin = provenance$origin
     ), back_to_lazy))
   }
 
@@ -887,12 +901,14 @@ check_vector_constant_sizes <- function(.data, expressions, verb) {
 # @param fractional Columns built from a floored fractional Date constant:
 #   warned about only if the call stays native (the CPU fallback's upload
 #   warns itself)
+# @param origin The user dot each parsed dot comes from (the `provenance` of
+#   expand_across_dots()), for the label of a min()/max(na.rm = TRUE) warning
 # @return A new tbl_gpu
 # @keywords internal
 mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, orig_groups,
                            keep, before_quo, after_quo, by_quo, fallback_data = .data,
                            drop = character(), dropped = character(),
-                           fractional = character(), minmax = NULL) {
+                           fractional = character(), minmax = NULL, origin = NULL) {
   exprs_raw <- stats::setNames(
     lapply(expressions, `[[`, "ir"),
     vapply(expressions, `[[`, character(1), "output_col")
@@ -925,8 +941,18 @@ mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, ori
       now, dots, expressions, orig_schema, orig_names, orig_groups, keep, before_quo, after_quo,
       by_quo,
       fallback_data = if (same) now else plan_now_columns(now, current_schema(fallback_data)$names),
-      drop = drop, dropped = dropped, fractional = fractional, minmax = minmax
+      drop = drop, dropped = dropped, fractional = fractional, minmax = minmax, origin = origin
     )))
+  }
+
+  # (#74) min()/max(na.rm = TRUE) over a group with no value left warns, once
+  # for the verb: the stage that holds those calls signals it when it runs
+  narm <- narm_warn_plan(expressions, plan, dots, origin, !quo_is_null_fast(by_quo), minmax)
+  if (isFALSE(narm)) {
+    return(mutate_window_fallback(
+      fallback_data, dots, keep, before_quo, after_quo, by_quo,
+      reason = "a min()/max() with na.rm = TRUE whose warning the GPU plan can't name (several stages, or empty groups too)."
+    ))
   }
 
   # F124: a lazy plan that cannot know its row count carries the warning of an
@@ -950,8 +976,9 @@ mutate_window <- function(.data, dots, expressions, orig_schema, orig_names, ori
                             input_schema = sch, carry = FALSE)
           sch <- .subset2(result, "schema")
         }
+        stage_narm <- if (!is.null(narm) && any(vapply(stage$specs, narm_minmax_spec, logical(1)))) narm
         result <- push_op(result, ast_window(input_node(result), stage$specs, orig_groups,
-                                             minmax_warn = minmax_prep),
+                                             minmax_warn = minmax_prep, narm_warn = stage_narm),
                           input_schema = sch, carry = FALSE)
         minmax_prep <<- NULL
         sch <- .subset2(result, "schema")
@@ -1520,6 +1547,7 @@ parse_mutate_dots <- function(dots, schema, verb, warn_unnamed = TRUE,
     }
 
     step <- make_mutate_expr(new_name, ir, schema)
+    step$dot <- i
     # a constant's names go with its column (R/col-attrs.R)
     if (!is.null(const$names)) {
       step$const_names <- const$names

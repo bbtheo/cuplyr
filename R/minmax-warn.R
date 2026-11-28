@@ -931,3 +931,124 @@ minmax_scan_resolve <- function(w, .data, by_given) {
                                unknown_empty = FALSE, scan = TRUE, footer = FALSE))
   invisible(w)
 }
+
+# -----------------------------------------------------------------------------
+# min()/max() with na.rm = TRUE over a group with no value left (#74)
+# -----------------------------------------------------------------------------
+#
+# dplyr evaluates `max(x, na.rm = TRUE)` once per group, and base R warns for
+# each group whose values are all NA/NaN (and for each empty one, which the
+# F124 machinery above names). The window computes -Inf/Inf for those groups
+# natively, so the verb plans the warning: `narm_warn_plan()` lists the calls
+# of the dots in dplyr's evaluation order, the window node that holds them
+# carries the list (`narm_warn`), and lower_window_narm_warn() finds the groups
+# when the node runs, with the aggregate summarise() uses for this (the same
+# group order and the same hit rows), and signals dplyr's one condition.
+
+# Is `spec` a window min()/max() with na.rm = TRUE?
+# @keywords internal
+narm_minmax_spec <- function(spec) {
+  isTRUE(.subset2(spec, "na_rm")) && !is.null(.subset2(spec, "cse_key"))
+}
+
+# The calls of a verb's dots that warn for an all-NA group.
+# @param expressions the parsed dots (`ir`, `dot`: the dot's position)
+# @param plan plan_mutate_window_batches()'s result
+# @param user_dots,origin the user's dots and the user dot each parsed dot comes from
+# @param by_given whether the call has `.by =` (groups in first-appearance order)
+# @param minmax the verb's F124 state (NULL when no group can be empty)
+# @return NULL when no call warns; the `narm_warn` of the window node; FALSE when
+#   the warning can't be planned (the calls are in several stages, or the verb's
+#   F124 warning for empty groups would be a second condition)
+# @keywords internal
+narm_warn_plan <- function(expressions, plan, user_dots, origin, by_given, minmax) {
+  specs <- plan$all_specs
+  is_narm <- vapply(specs, narm_minmax_spec, logical(1))
+  if (!any(is_narm)) {
+    return(NULL)
+  }
+  by_key <- stats::setNames(specs[is_narm], vapply(specs[is_narm], `[[`, character(1), "cse_key"))
+  in_stage <- 0L
+  for (bp in plan$batch_plans) {
+    for (stage in bp$stages) {
+      in_stage <- in_stage + any(vapply(stage$specs, narm_minmax_spec, logical(1)))
+    }
+  }
+  if (in_stage > 1L) {
+    return(FALSE)
+  }
+  if (!is.null(minmax) && (isTRUE(minmax$unknown_empty) ||
+        (!is.null(minmax$facts) && minmax$facts$E > 0L && minmax$facts$n_in > 0L))) {
+    return(FALSE)
+  }
+  head <- minmax_verb_head("mutate", NA_integer_)
+  names_user <- rlang::names2(user_dots)
+  calls <- list()
+  for (e in expressions) {
+    walk <- function(node) {
+      if (!inherits(node, "cuplyr_ir") || !identical(node$kind, "call")) {
+        return(invisible())
+      }
+      for (a in node$args) walk(a)
+      if (node$op %in% c("min", "max") && isTRUE(node$meta$na_rm)) {
+        spec <- by_key[[rlang::hash(list(op = node$op, args = node$args, meta = node$meta))]]
+        if (is.null(spec)) {
+          stop("internal error: a min()/max() with na.rm = TRUE has no window spec", call. = FALSE)
+        }
+        d <- e$dot
+        o <- if (length(origin) >= d && !is.na(origin[[d]])) origin[[d]] else d
+        calls[[length(calls) + 1L]] <<- list(
+          dot = list(id = d, name = names_user[[o]], expr = rlang::quo_get_expr(user_dots[[o]]), head = head),
+          op = node$op, value_col = spec$value_col, spec_col = spec$output_col
+        )
+      }
+    }
+    walk(e$ir)
+  }
+  list(by_first = by_given, calls = calls)
+}
+
+# Signal the warning of a window node's min()/max(na.rm = TRUE) calls: the
+# groups with no value left, found with summarise()'s own min()/max() (na.rm,
+# identity report) over the node's input. An input with no row is the F124
+# warning's (one evaluation, no group line).
+# @keywords internal
+lower_window_narm_warn <- function(narm, input_ptr, input_schema, groups) {
+  if (gpu_dim(input_ptr)[[1L]] == 0L) {
+    return(invisible())
+  }
+  calls <- narm$calls
+  pair <- vapply(calls, function(cl) paste(cl$op, cl$value_col, sep = "\r"), character(1))
+  uniq <- unique(pair)
+  first <- match(uniq, pair)
+  k <- length(uniq)
+  group_idx <- if (length(groups) > 0L) match(groups, input_schema$names) - 1L else integer()
+  res <- gpu_summarise(
+    input_ptr, group_idx,
+    match(vapply(calls[first], `[[`, character(1), "value_col"), input_schema$names) - 1L,
+    vapply(calls[first], `[[`, character(1), "op"),
+    rep(TRUE, k), rep(NA_real_, k), rep(TRUE, k),
+    if (isTRUE(narm$by_first)) "first" else "keys"
+  )
+  hits <- attr(res, "identity_rows")
+  grouped <- length(groups) > 0L
+  key_at <- function(row) {
+    group_keys_frame(
+      gpu_gather_rows(list(gpu_select(res, seq_along(groups) - 1L)), as.numeric(row - 1L)),
+      group_keys_schema(list(schema = input_schema, groups = groups))
+    )
+  }
+  records <- list()
+  for (i in seq_along(calls)) {
+    rows <- hits[[match(pair[[i]], uniq)]]
+    rows <- rows[!is.na(rows)]
+    if (length(rows) == 0L) next
+    records[[length(records) + 1L]] <- local({
+      row <- min(rows)
+      list(dot = calls[[i]]$dot, op = calls[[i]]$op, type = "FLOAT64", col = calls[[i]]$spec_col,
+           n = length(rows), id = if (grouped) as.integer(row) else NA_integer_,
+           keys = function() key_at(row))
+    })
+  }
+  minmax_emit(records)
+}

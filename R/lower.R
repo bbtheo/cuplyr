@@ -1240,6 +1240,12 @@ lower_window <- function(ast, source_ptr) {
     minmax_signal_prepared(mm_warn)
   }
 
+  # (#74) min()/max() with na.rm = TRUE over a group with no value left
+  narm <- .subset2(ast, "narm_warn")
+  if (!is.null(narm)) {
+    lower_window_narm_warn(narm, input_ptr, input_schema, ast$group_cols)
+  }
+
   # F42: an integer/logical window sum() that left the integer range came
   # back as FLOAT64 (dplyr returns a double there; `sum_overflow` has one flag
   # per spec). A lazy plan declared INT32 statically, so it can't absorb that:

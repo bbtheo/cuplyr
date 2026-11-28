@@ -2159,12 +2159,13 @@ across_is_clock_call <- function(e, env) {
 across_infer_output <- function(quo, run) {
   unknown <- list(type = NA_character_, maybe = TRUE)
   expr <- rlang::quo_get_expr(quo)
+  row_count <- across_is_row_count_call(expr)
   if (isTRUE(run$unknown_set) || anyDuplicated(run$names) > 0L ||
-        expr_has_mask_only_call(expr) || expr_reaches_mask(expr)) {
+        (!row_count && (expr_has_mask_only_call(expr) || expr_reaches_mask(expr)))) {
     return(unknown)
   }
   literal <- is.atomic(expr) && length(expr) == 1L
-  if (!literal && !expr_has_column_ref(expr, run)) {
+  if (!literal && !expr_has_column_ref(expr, run) && !row_count) {
     return(unknown)
   }
   # an operand of unknown type makes the result's type unknown
@@ -2177,6 +2178,25 @@ across_infer_output <- function(quo, run) {
   }
   # (F88: a probe for a type, never a dot's reason)
   fallback_probe(across_infer_parsed(quo, run, unknown))
+}
+
+# (#74) `n()`, `row_number()` and `ntile(n = k)` read no column but are the
+# integer columns a later `across(where(is.integer))` of the same call sees:
+# the call is dplyr's own (a `dplyr::` prefix is allowed), its arguments written
+# constants.
+# @keywords internal
+across_is_row_count_call <- function(expr) {
+  if (!is.call(expr)) {
+    return(FALSE)
+  }
+  fn <- call_head_name(expr)
+  head <- expr[[1L]]
+  if (is.null(fn) || !fn %in% c("n", "row_number", "ntile") ||
+      (is.call(head) && !identical(as.character(head[[2L]]), "dplyr"))) {
+    return(FALSE)
+  }
+  all(vapply(as.list(expr)[-1L], function(a) is.atomic(a) && length(a) == 1L && is.null(attributes(a)),
+             logical(1)))
 }
 
 # across_infer_output() once its checks let it parse `quo`.
@@ -2216,10 +2236,11 @@ across_infer_parsed <- function(quo, run, unknown) {
 # input the native path takes, with the package a `pkg::fn` call may name.
 # Each was checked against dplyr 1.2.1 and lubridate on plain tibbles, for
 # logical, integer, double, character, Date and POSIXct inputs, n odd and
-# even. Left out because R's type differs: ntile() (integer in R), year(),
-# month(), second(), yday() and wday() (doubles in lubridate), and cuplyr's
-# roll_*()/data.table's froll*(). across_r_typed() adds the cases that
-# depend on the input type.
+# even. Left out because R's type differs: second() (a double in lubridate, the
+# GPU's is the whole second), cuplyr's roll_median() and data.table's
+# froll*(). roll_sum()/roll_mean()/roll_sd() are doubles (so is roll_min()/
+# roll_max() of a double: across_r_typed() takes those for a FLOAT64 argument
+# only). across_r_typed() adds the cases that depend on the input type.
 # @keywords internal
 across_r_typed_fns <- c(
   "(" = "base", "~" = "base", "c" = "base", ":" = "base",
@@ -2247,7 +2268,11 @@ across_r_typed_fns <- c(
   coalesce = "dplyr", na_if = "dplyr", case_match = "dplyr",
   recode = "dplyr", recode_values = "dplyr", replace_values = "dplyr", replace_when = "dplyr",
   as_date = "lubridate", day = "lubridate", hour = "lubridate",
-  minute = "lubridate", quarter = "lubridate"
+  minute = "lubridate", quarter = "lubridate",
+  year = "lubridate", month = "lubridate", yday = "lubridate", wday = "lubridate",
+  n = "dplyr", ntile = "dplyr",
+  roll_sum = "cuplyr", roll_mean = "cuplyr", roll_sd = "cuplyr",
+  roll_min = "cuplyr", roll_max = "cuplyr"
 )
 
 # Of those, the ones whose result type in R doesn't depend on their
@@ -2317,7 +2342,7 @@ across_r_typed <- function(expr, env, run) {
     return(TRUE)
   }
   args <- as.list(expr)[-1]
-  if (fn %in% c("median", "max", "min", "cummax", "cummin") ||
+  if (fn %in% c("median", "max", "min", "cummax", "cummin", "roll_min", "roll_max") ||
         (identical(fn, "-") && length(args) == 1L)) {
     arg_names <- names(args) %||% rep("", length(args))
     x <- if ("x" %in% arg_names) args["x"] else utils::head(args[!nzchar(arg_names)], 1L)
@@ -2327,6 +2352,9 @@ across_r_typed <- function(expr, env, run) {
     type <- arg_type(x[[1]])
     ok <- if (identical(fn, "median")) {
       isTRUE(type %in% c("FLOAT64", "TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS"))
+    } else if (fn %in% c("roll_min", "roll_max")) {
+      # R gives a double, the GPU keeps an integer argument's type
+      isTRUE(unname(type) == "FLOAT64")
     } else {
       !is.na(type) && type != "BOOL8"
     }

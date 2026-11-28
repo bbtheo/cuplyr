@@ -113,7 +113,9 @@ pattern (\code{ignore.case}, \code{perl} and \code{useBytes} run on the CPU)
 days, lubridate's \code{year()}, \code{month()}, \code{day()}, \code{hour()}, \code{minute()},
 \code{second()}, \code{quarter()}, \code{yday()}, \code{wday()}, \code{floor_date()},
 \code{ceiling_date()} and \code{round_date()}, and \code{as.Date()}/\code{as.POSIXct()},
-for the arguments the GPU supports; other forms run on the CPU
+for the arguments the GPU supports; other forms run on the CPU.
+\code{year()}, \code{month()}, \code{yday()} and \code{wday()} are doubles, as in
+lubridate (\code{day()}, \code{quarter()}, \code{hour()}, \code{minute()} are integers)
 \item A factor column compared with a label (\code{f == "a"}, \code{f \%in\% c("a", "b")}, and \code{<}, \code{>}, ... for an ordered factor), and
 \code{as.character()}, \code{as.integer()} or \code{as.numeric()} of a factor column
 \item \code{if_else(cond, yes, no, missing = NULL)} -- strict-but-promoting
@@ -218,7 +220,13 @@ of its group (or the whole table, ungrouped);
 follow R's \code{na.rm = FALSE} default (any \code{NA} in the group
 makes that group's result \code{NA}); \code{n()} always counts every
 row regardless of \code{NA}s, and \code{n_distinct()} counts \code{NA} as a
-value. \code{median()} runs on the GPU for a double, \code{Date} or
+value. \code{mean(x, na.rm = TRUE)} of a logical, integer or double
+drops \code{NA} and \code{NaN} (a group with none left is \code{NaN}), and so
+does \code{min()}/\code{max(x, na.rm = TRUE)} of a double (a group with none
+left is \code{Inf}/\code{-Inf}, with dplyr's warning); \code{min()}/\code{max(x, na.rm = TRUE)} of an integer or logical runs on the CPU, because
+dplyr makes the whole column a double when some group has no value
+left. \code{median()}, \code{sd()} and \code{var()} with \code{na.rm = TRUE} run on the
+CPU. \code{median()} runs on the GPU for a double, \code{Date} or
 \code{POSIXct} column (of an integer or logical one, on the CPU), and
 \code{min()}/\code{max()} of a string column under the collation rule of the
 comparisons above. On the GPU, \code{mean()} and \code{median()} of a \code{Date}
@@ -251,6 +259,8 @@ GPU: a window call wrapped directly (\code{cumsum()}/\code{cummax()}/\code{cummi
 and \code{cummean()}/\code{cumall()}/\code{cumany()}/\code{consecutive_id()}),
 the rank functions that depend only on the values
 (\code{min_rank()}, \code{dense_rank()}, ... are unaffected by the order),
+\code{row_number(x)} and \code{ntile(x, n)} (the ties of \code{x} are broken by
+the order, then by row),
 and an elementwise call whose other arguments are scalars
 (\code{order_by(o, cumsum(x) * 2)} is \code{cumsum(x) * 2}: the window
 inside the first argument runs in row order, as in dplyr).
@@ -258,7 +268,6 @@ Everything else runs the whole call on the CPU, which gives
 dplyr's value or error: \code{roll_median()}, an elementwise call with
 another column argument (\code{order_by(o, cumsum(x) + lag(x))}), a
 \code{NULL} or empty extra argument (\code{lag(x, default = NULL)}),
-\code{row_number(x)}/\code{ntile(x, n)} (ties broken by the order),
 \code{first()}/\code{last()}/\code{nth()}, aggregates, a nested \code{order_by()} as
 the wrapped call itself (\code{order_by(o, order_by(i, cumsum(x)))};
 nested inside the first argument it stays on the GPU), and shapes
@@ -328,8 +337,11 @@ sends to the CPU, runs the whole \code{mutate()} call in dplyr on the CPU (set
 \code{options(cuplyr.fallback = "warn")} to be told when; see
 \link{cuplyr-fallback}). So does an argument type for which the GPU would not
 give R's result, for example \code{cummax()} of a logical column, or \code{sum()},
-\code{mean()}, \code{min()} or \code{max()} of an integer64 column. Among the other
-cases:
+\code{mean()}, \code{min()} or \code{max()} of an integer64 column (an integer64 column
+stays on the GPU for comparisons, \code{is.na()}, the rank functions,
+\code{first()}/\code{last()}/\code{nth()}, \code{n_distinct()}, \code{lag()}/\code{lead()} with an
+integer64 or integer \code{default}, and \code{\%in\%} an integer64 or integer vector;
+\code{\%in\%} a double vector runs on the CPU). Among the other cases:
 \itemize{
 \item \code{order_by()}/\code{with_order()} with a general expression as the
 ordering argument (only a bare column, \code{desc(column)}, or \code{-column}

@@ -312,16 +312,23 @@ ast_slice <- function(input, mode, amount = NULL, is_prop = NULL,
 #'   (`minmax_win_lazy_prep()`): lowering signals it when the node's input has no
 #'   rows, or every time it runs when it is `always` (a parquet plan whose empty
 #'   groups a facts query found at the verb).
+#' @param narm_warn `NULL`, or what lowering needs to signal dplyr's warning for
+#'   a `min()`/`max()` call with `na.rm = TRUE` over a group with no value left
+#'   (`narm_warn_plan()`, R/minmax-warn.R): the call head, whether groups are in
+#'   first-appearance order, and the calls in evaluation order.
 #' @return An ast_window node
 #' @keywords internal
 ast_window <- function(input, specs, group_cols = character(),
-                       on_sum_overflow = "error", minmax_warn = NULL) {
+                       on_sum_overflow = "error", minmax_warn = NULL, narm_warn = NULL) {
+  node <- ast_node("window", input = input, specs = specs, group_cols = group_cols,
+                   on_sum_overflow = on_sum_overflow)
   if (!is.null(minmax_warn)) {
-    return(ast_node("window", input = input, specs = specs, group_cols = group_cols,
-                    on_sum_overflow = on_sum_overflow, minmax_warn = minmax_warn))
+    node$minmax_warn <- minmax_warn
   }
-  ast_node("window", input = input, specs = specs, group_cols = group_cols,
-           on_sum_overflow = on_sum_overflow)
+  if (!is.null(narm_warn)) {
+    node$narm_warn <- narm_warn
+  }
+  node
 }
 
 #' Create a rename AST node

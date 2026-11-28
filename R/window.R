@@ -217,6 +217,11 @@ extract_one_window_call <- function(node, schema, state, key = NULL) {
     # below -- e.g. `first(x, order_by = y)` frames on `y`, not `x`.
     order_cols <- node$meta$order_override$col
     order_desc <- node$meta$order_override$desc
+    if (isTRUE(node$meta$order_override$by_value)) {
+      # (#74) row_number(x) under an order: ranked by x, ties by the order
+      order_cols <- c(value_col, order_cols)
+      order_desc <- c(isTRUE(node$meta$rank_desc), order_desc)
+    }
   } else if (identical(entry$window$kind, "rank") && !is.na(value_col)) {
     order_cols <- value_col
     order_desc <- isTRUE(node$meta$rank_desc)
@@ -249,6 +254,10 @@ extract_one_window_call <- function(node, schema, state, key = NULL) {
   if (int_sum && identical(state$sums, "lenient") && !is.null(key) &&
       key %in% state$nested_sum_keys) {
     spec$on_sum_overflow <- "error"
+  }
+  # (#74) a min()/max() with na.rm = TRUE finds its warning's calls by this key
+  if (isTRUE(spec$na_rm) && spec$fn %in% c("min", "max") && !is.null(key)) {
+    spec$cse_key <- key
   }
   state$specs[[out_name]] <- spec
 
