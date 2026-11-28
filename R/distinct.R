@@ -162,6 +162,7 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
   expressions <- list()
   computed <- logical(length(dots))
   any_window <- FALSE
+  narm_dot <- 0L
   frame <- environment()
 
   for (i in seq_along(dots)) {
@@ -193,9 +194,20 @@ distinct.tbl_gpu <- function(.data, ..., .keep_all = FALSE) {
       schema <- update_schema_for_expr(schema, step)
       computed[i] <- TRUE
       any_window <- any_window || ir_has_window(ir)
+      if (narm_dot == 0L && ir_has_narm_minmax(ir)) {
+        narm_dot <- i
+      }
     }
   }
 
+  # (#74, narm_key_reason)
+  if (narm_dot > 0L) {
+    fallback_dot_failed(dots[[narm_dot]], narm_key_reason)
+    return(distinct_fallback(
+      .data, orig_dots, .keep_all,
+      reason = fallback_failed_reason(orig_dots, narm_key_reason)
+    ))
+  }
   if (any_window) {
     # A window or aggregate key needs mutate()'s window planning, which a
     # hand-built ast_mutate lacks. dplyr evaluates the keys over the whole

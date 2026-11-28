@@ -1207,7 +1207,8 @@ lower_window <- function(ast, source_ptr) {
   # gpu_window() assembles the output purely from each spec's own
   # out_pos -- but keeps `show_query()`/debugging output deterministic).
   frame_keys <- vapply(specs, function(s) {
-    paste(c(s$order_cols, ifelse(s$order_desc, "D", "A")), collapse = "")
+    # (a separator no column name holds, so `a`,`bA` and `ab`,`A` differ)
+    paste(c(s$order_cols, ifelse(s$order_desc, "D", "A")), collapse = "\001")
   }, character(1))
   uniq_keys <- unique(frame_keys)
 
@@ -1238,6 +1239,12 @@ lower_window <- function(ast, source_ptr) {
   mm_warn <- .subset2(ast, "minmax_warn")
   if (!is.null(mm_warn) && (isTRUE(mm_warn$always) || gpu_dim(input_ptr)[[1L]] == 0L)) {
     minmax_signal_prepared(mm_warn)
+  }
+
+  # (#74) min()/max() with na.rm = TRUE over a group with no value left
+  narm <- .subset2(ast, "narm_warn")
+  if (!is.null(narm)) {
+    lower_window_narm_warn(narm, input_ptr, input_schema, ast$group_cols)
   }
 
   # F42: an integer/logical window sum() that left the integer range came

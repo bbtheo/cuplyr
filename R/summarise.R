@@ -123,7 +123,9 @@
 #' functions [mutate.tbl_gpu()] runs on the GPU), and the aggregation then
 #' reduces that per-row result, as dplyr does. This applies to the argument
 #' of one aggregation; several aggregation calls in one expression are
-#' combined as described in the next section.
+#' combined as described in the next section. One exception: an argument
+#' holding `min()`/`max(x, na.rm = TRUE)` (`mean(v / max(v, na.rm = TRUE))`)
+#' is left to dplyr, which warns for a group with no value left.
 #'
 #' ## Arithmetic around reducers
 #' An expression may combine reducer calls with arithmetic, comparisons, math
@@ -1361,6 +1363,11 @@ summarise_dots_parseable <- function(dots, schema, ir_cache = NULL) {
     # scalar, which the broadcast-then-reduce window path would get wrong.
     if (ir_agg_arg_is_scalar_reduction(ir)) {
       return(no(i, "a reducer of a one-value argument (`sum(mean(x))`, `sum(n())`) is evaluated per group by dplyr."))
+    }
+    # (#74) a min()/max() with na.rm = TRUE warns for a group with no value left,
+    # naming this dot; the window plan doesn't carry that warning: dplyr's call
+    if (ir_has_narm_minmax(ir)) {
+      return(no(i, fn_says(decomposed$fn_name, "of an expression with a min()/max() with na.rm = TRUE is evaluated per group by dplyr, which warns for a group with no value left.")))
     }
     if (ir_has_window(ir)) {
       next  # windows-inside-summarise: always valid (Phase 6, task 4)

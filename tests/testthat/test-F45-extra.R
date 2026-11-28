@@ -87,7 +87,7 @@ test_that("a column removed with a literal NULL and re-created is appended, nati
 # --- round 4: the running schema records R's type, or none -------------------
 # A created column's type in the running schema must be the one R gives it,
 # since a later where() selects by it. Where cuplyr's static type may differ
-# (median() of an integer, max() of a logical, lubridate's year()), the type
+# (median() of an integer, max() of a logical), the type
 # is NA: the column exists, a type predicate goes to dplyr.
 
 test_that("the running schema records only types R surely gives", {
@@ -113,16 +113,18 @@ test_that("the running schema records only types R surely gives", {
   expect_identical(type_of(rlang::quo(cummin(l))), unknown)
   expect_identical(type_of(rlang::quo(-l)), untyped)
   expect_identical(type_of(rlang::quo(max(i)))$type, "INT32")
-  expect_identical(type_of(rlang::quo(ntile(i, 2))), untyped)
+  expect_identical(type_of(rlang::quo(ntile(i, 2)))$type, "INT32")
   # F48: likewise a difftime value
   expect_identical(type_of(rlang::quo(lag(median(i)))), unknown)
   expect_identical(type_of(rlang::quo(x + kdt)), unknown)
   expect_identical(type_of(rlang::quo(x + !!kdt)), unknown)
   expect_identical(type_of(rlang::quo(i + k))$type, "INT32")
   skip_if_not_installed("lubridate")
-  expect_identical(type_of(rlang::quo(year(d))), untyped)
-  expect_identical(type_of(rlang::quo(year(d) + 1L)), untyped)
-  expect_identical(type_of(rlang::quo(lubridate::year(d))), untyped)
+  # (#74) lubridate's year(), month(), yday() and wday() are doubles, on the GPU too
+  expect_identical(type_of(rlang::quo(year(d)))$type, "FLOAT64")
+  expect_identical(type_of(rlang::quo(year(d) + 1L))$type, "FLOAT64")
+  expect_identical(type_of(rlang::quo(lubridate::year(d)))$type, "FLOAT64")
+  expect_identical(type_of(rlang::quo(lubridate::wday(d)))$type, "FLOAT64")
   expect_identical(type_of(rlang::quo(year(d) > 2000))$type, "BOOL8")
   expect_identical(type_of(rlang::quo(day(d)))$type, "INT32")
   expect_identical(type_of(rlang::quo(lubridate::day(d)))$type, "INT32")

@@ -9,7 +9,8 @@ ast_window(
   specs,
   group_cols = character(),
   on_sum_overflow = "error",
-  minmax_warn = NULL
+  minmax_warn = NULL,
+  narm_warn = NULL
 )
 }
 \arguments{
@@ -37,6 +38,11 @@ a later stage consumes).}
 (\code{minmax_win_lazy_prep()}): lowering signals it when the node's input has no
 rows, or every time it runs when it is \code{always} (a parquet plan whose empty
 groups a facts query found at the verb).}
+
+\item{narm_warn}{\code{NULL}, or what lowering needs to signal dplyr's warning for
+a \code{min()}/\code{max()} call with \code{na.rm = TRUE} over a group with no value left
+(\code{narm_warn_plan()}, R/minmax-warn.R): the call head, whether groups are in
+first-appearance order, and the calls in evaluation order.}
 }
 \value{
 An ast_window node

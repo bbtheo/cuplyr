@@ -1716,6 +1716,9 @@ ir_parse_pre_registry <- function(expr, env, schema, allow_vector, fn_name, head
   if (fn_name %in% c("mean", "median") && length(expr) == 3L) {
     return(ir_parse_mean_median_call(expr, env, schema, fn_name))
   }
+  if (fn_name %in% c("min", "max") && length(expr) == 3L && identical(names(expr)[-1L], c("", "na.rm"))) {
+    return(ir_parse_minmax_na_rm_call(expr, env, schema, fn_name))
+  }
 
   # Rolling windows (scratchpad/todo.md "Rolling-window benchmark
   # target"): cuplyr's own roll_*() names, and an alias for
@@ -3296,7 +3299,7 @@ ir_parse_when_reduce <- function(expr, env, schema, fn_name) {
 #'
 #' @return `list(ok = <logical>, value = <the evaluated R value, or NULL>)`
 #' @keywords internal
-ir_eval_constant <- function(raw_expr, env) {
+ir_eval_constant <- function(raw_expr, env, allow_int64 = FALSE) {
   if (ir_fold_reaches_mask(raw_expr)) {
     return(list(ok = FALSE, value = NULL))
   }
@@ -3307,7 +3310,7 @@ ir_eval_constant <- function(raw_expr, env) {
   }
   # F96: a parameter (`n`, `default`, a pattern, ...) that is an integer64
   # is vctrs' to cast or reject, and its bits are not a number: the CPU's
-  if (inherits(got$value, "integer64")) {
+  if (inherits(got$value, "integer64") && !allow_int64) {
     list(ok = FALSE, value = NULL)
   } else {
     list(ok = TRUE, value = got$value)
@@ -3405,11 +3408,16 @@ ir_parse_shift_call <- function(expr, env, schema, fn_name) {
 
   default_ir <- NULL
   if (!is.null(present_args$default)) {
-    default_eval <- ir_eval_constant(present_args$default, env)
+    # (#74) an integer64 default is read here, for an integer64 `x` only
+    default_eval <- ir_eval_constant(present_args$default, env, allow_int64 = TRUE)
     if (!default_eval$ok) {
       return(NULL)  # non-constant default: not implemented this wave
     }
     default_val <- default_eval$value
+    if (inherits(default_val, "integer64") &&
+        !identical(unname(tryCatch(ir_infer_type(x_ir, schema), error = function(e) NA_character_)), "INT64")) {
+      return(NULL)  # vctrs casts it to x's type
+    }
     if (!is.null(default_val)) {
       if (is_timespan_value(default_val)) {
         return(NULL)  # F48: a Period/Duration default is not a plain number
@@ -3689,7 +3697,15 @@ ir_order_windows <- function(ir, order_ref) {
         node$args <- lapply(node$args, walk)
         return(node)
       }
-      ok <<- FALSE  # row_number(x): ties are broken by the order
+      if (identical(node$op, "row_number") && length(node$args) == 1L &&
+          is.null(node$meta$order_override)) {
+        # (#74) row_number(x) of `x[o]`, permuted back: x's ties are broken by
+        # the order, then by row. The frame sorts by x, then the order
+        # (extract_one_window_call()).
+        node$meta$order_override <- c(order_ref, list(by_value = TRUE))
+        return(node)
+      }
+      ok <<- FALSE
       return(node)
     }
     if (identical(kind, "agg") && node$op %in% ir_order_invariant_aggs) {
@@ -3800,10 +3816,28 @@ ir_parse_with_order <- function(order_ref, head, a1, rest, env, schema) {
     return(NULL)
   }
 
+  # (#74) row_number(desc(x)): x ranked descending (the node's `rank_desc`, as
+  # ir_parse_expr() reads a bare `row_number(desc(x))`), ties by the order
+  rank_desc <- FALSE
+  if (identical(as.character(head_name), "row_number") && length(rest) == 0L &&
+      !is.null(inner <- ir_unwrap_desc(a1))) {
+    a1 <- inner
+    rank_desc <- TRUE
+  }
+
   # The first argument's one evaluation (dplyr evaluates it before `...`).
   a1_ir <- ir_parse_expr(a1, env, schema)
   if (is.null(a1_ir) || !ir_is_row_sized(a1_ir)) {
     return(NULL)
+  }
+  if (rank_desc) {
+    # dplyr's desc() is `-xtfrm(x)`: an integer64 is ranked by its bits, a
+    # string in the session collation (see ir_parse_expr()'s rank-desc branch)
+    type <- unname(tryCatch(ir_infer_type(a1_ir, schema), error = function(e) NA_character_))
+    if (identical(type, "INT64") ||
+        (!session_collation_is_c() && (is.na(type) || identical(type, "STRING")))) {
+      return(NULL)
+    }
   }
 
   # The others, each evaluated once; the call is parsed with the VALUE in its
@@ -3856,6 +3890,12 @@ ir_parse_with_order <- function(order_ref, head, a1, rest, env, schema) {
     if (!is.null(entry) && identical(entry$window$kind, "agg")) {
       return(NULL)  # an aggregate has no row to put back
     }
+  }
+  if (rank_desc) {
+    if (!identical(call_ir$kind, "call") || !identical(call_ir$op, "row_number")) {
+      return(NULL)
+    }
+    call_ir$meta$rank_desc <- TRUE
   }
   call_ir <- ir_order_windows(call_ir, order_ref)
   if (is.null(call_ir) || is.null(placeholder)) {
@@ -4421,7 +4461,39 @@ ir_parse_mean_median_call <- function(expr, env, schema, fn_name) {
     return(ir_call(fn_name, list(x_ir)))
   }
   x_type <- tryCatch(unname(ir_infer_type(x_ir, schema)), error = function(e) NA_character_)
-  if (!x_type %in% c("TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS")) {
+  # (#74) a mean() of a number drops NA and NaN (is.na()); nothing left is NaN
+  ok <- c("TIMESTAMP_DAYS", "TIMESTAMP_MICROSECONDS", if (identical(fn_name, "mean")) c("BOOL8", "INT32", "FLOAT64"))
+  if (!x_type %in% ok) {
+    return(NULL)
+  }
+  ir_call(fn_name, list(x_ir), meta = list(na_rm = TRUE))
+}
+
+# (#74) `min(x, na.rm = <literal>)` / `max(...)` in mutate()/filter(). `na.rm =
+# FALSE` is the one-argument call. `na.rm = TRUE` is native for a double: NA and
+# NaN are dropped, a group with nothing left gives Inf (min) / -Inf (max) and
+# base R's warning (lower_window() signals it, R/minmax-warn.R). An integer or
+# logical one is a double in dplyr only when some group has nothing left, so its
+# type is the data's: NULL (CPU), as is any other type or shape.
+ir_parse_minmax_na_rm_call <- function(expr, env, schema, fn_name) {
+  args_raw <- as.list(expr)[-1]
+  arg_names <- names(args_raw)
+  if (is.null(arg_names) || !identical(arg_names, c("", "na.rm"))) {
+    return(NULL)
+  }
+  x_ir <- ir_parse_expr(args_raw[[1]], env, schema)
+  if (is.null(x_ir)) {
+    return(NULL)
+  }
+  na_rm_val <- ir_na_flag_value(args_raw[[2]], env, schema)
+  if (is.null(na_rm_val)) {
+    return(NULL)
+  }
+  if (!na_rm_val) {
+    return(ir_parse_minmax(fn_name)(list(x_ir), schema))
+  }
+  x_type <- tryCatch(unname(ir_infer_type(x_ir, schema)), error = function(e) NA_character_)
+  if (!identical(x_type, "FLOAT64") || ir_has_window(x_ir) || ir_is_group_scalar(x_ir)) {
     return(NULL)
   }
   ir_call(fn_name, list(x_ir), meta = list(na_rm = TRUE))
@@ -4785,6 +4857,25 @@ ir_has_window <- function(ir) {
   # A plain list of IR nodes (e.g. a call node's `$args`).
   for (i in seq_along(ir)) {
     if (ir_has_window(.subset2(ir, i))) {
+      return(TRUE)
+    }
+  }
+  FALSE
+}
+
+# (#74) Does an IR (sub)tree hold a `min()`/`max()` with `na.rm = TRUE` (ir_parse_minmax_na_rm_call())?
+# Over a group with no value left dplyr's call warns, and only mutate() plans that
+# warning: a verb that can't (summarise(), reframe(), count()) leaves the call to dplyr.
+# @keywords internal
+ir_has_narm_minmax <- function(ir) {
+  if (!inherits(ir, "cuplyr_ir") || !identical(.subset2(ir, "kind"), "call")) {
+    return(FALSE)
+  }
+  if (isTRUE(.subset2(.subset2(ir, "meta"), "na_rm")) && .subset2(ir, "op") %in% c("min", "max")) {
+    return(TRUE)
+  }
+  for (arg in .subset2(ir, "args")) {
+    if (ir_has_narm_minmax(arg)) {
       return(TRUE)
     }
   }
@@ -5219,7 +5310,8 @@ ir_infer_type <- function(ir, schema) {
 # timestamp operand is ir_check_ts_operands()'s (it carries an internal INT64
 # literal for POSIXct shifts).
 # @keywords internal
-ir_int64_native_ops <- c("is.na", "row_number", "min_rank", "dense_rank")
+ir_int64_native_ops <- c("is.na", "row_number", "min_rank", "dense_rank", "percent_rank",
+                         "cume_dist", "first", "last", "nth", "n_distinct")
 ir_int64_cmp_ops <- c("==", "!=", "<", "<=", ">", ">=")
 ir_check_int64_operands <- function(ir, arg_types) {
   if (any(match(arg_types, cuplyr_timestamp_types, 0L) > 0L)) {
@@ -5231,8 +5323,16 @@ ir_check_int64_operands <- function(ir, arg_types) {
   } else if (match(op, ir_int64_native_ops, 0L) > 0L) {
     TRUE
   } else if (op == "lag" || op == "lead") {
+    # (#74) a default that is an integer64 or an integer value fills exactly
     default <- .subset2(.subset2(ir, "meta"), "default")
-    is.null(default) || isTRUE(.subset2(default, "na"))
+    is.null(default) || isTRUE(.subset2(default, "na")) ||
+      .subset2(default, "type") %in% c("INT64", "INT32")
+  } else if (op == "%in%") {
+    # (#74) an integer64 x against an integer64 or integer table (an NA in the
+    # table matches an NA). base match() reads a double table through its
+    # characters (`1e5` is not "100000"): the CPU.
+    arg_types[[1L]] == "INT64" && arg_types[[2L]] %in% c("INT64", "INT32") &&
+      identical(.subset2(.subset2(ir, "args")[[2L]], "kind"), "lit")
   } else {
     FALSE
   }
@@ -7299,6 +7399,12 @@ ir_parse_lubridate_accessor <- function(expr, env, schema, fn_name) {
     return(NULL)  # F32: wall clock in a non-UTC zone is computed by R itself
   }
 
+  # (#74) lubridate's year(), month(), yday() and wday() are doubles (day(),
+  # quarter(), hour() and minute() integers): the GPU part is an INT32, cast
+  # to the type R gives it.
+  if (fn_name %in% c("year", "month", "yday", "wday")) {
+    return(ir_call("cast_float64", list(ir_call(fn_name, list(x_ir)))))
+  }
   ir_call(fn_name, list(x_ir))
 }
 

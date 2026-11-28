@@ -131,6 +131,7 @@ resolve_grouping_dots <- function(.data, dots, call = rlang::caller_env(),
   names_out <- character(length(dots))
   computed <- logical(length(dots))
   any_window <- FALSE
+  narm_dot <- 0L
 
   for (i in seq_along(dots)) {
     new_name <- names(dots)[i]
@@ -158,11 +159,18 @@ resolve_grouping_dots <- function(.data, dots, call = rlang::caller_env(),
       schema <- update_schema_for_expr(schema, step)
       computed[i] <- TRUE
       any_window <- any_window || ir_has_window(ir)
+      if (narm_dot == 0L && ir_has_narm_minmax(ir)) {
+        narm_dot <- i
+      }
     }
 
     names_out[i] <- new_name
   }
 
+  if (narm_dot > 0L) {
+    fallback_dot_failed(dots[[narm_dot]], narm_key_reason)
+    return(NULL)
+  }
   result <- .data
   if (any_window) {
     # As distinct(): a window or aggregate key is computed by mutate() over
@@ -178,6 +186,62 @@ resolve_grouping_dots <- function(.data, dots, call = rlang::caller_env(),
   result <- regroup_for_keys(result, names_out)
 
   list(data = result, names = unique(names_out))
+}
+
+# (#74) A key's (or `wt`'s) min()/max(na.rm = TRUE), for a group with no value
+# left, warns in dplyr with the verb that evaluates it (`count()`,
+# `distinct()`, `group_by()`, `add_count()`). The GPU computes the call in the
+# key's mutate(), whose warning would name `mutate()` and label a key the user
+# left unnamed by its column name: such a key is the verb's to run whole. Only
+# a key whose parse holds the call (ir_has_narm_minmax()) is: one that folds to
+# a constant, or with `na.rm = FALSE`, stays on the GPU.
+narm_key_reason <- "dplyr's warning for a min()/max(na.rm = TRUE) over a group with no value left names this verb."
+
+# The first of the quosures `dots` that holds a min()/max(na.rm = TRUE) the GPU
+# would compute, judged on its parse against `schema` (0L for none). A dot that
+# calls min()/max() with `na.rm` but does not parse against `schema` (it reads
+# an earlier dot's column) counts too: the GPU can't say what it does.
+# @keywords internal
+narm_minmax_dot <- function(dots, schema) {
+  for (i in seq_along(dots)) {
+    if (!expr_has_minmax_na_rm(dots[[i]])) {
+      next
+    }
+    ir <- tryCatch(ir_parse_quo(dots[[i]], schema), error = function(e) NULL)
+    if (is.null(ir) || ir_has_narm_minmax(ir)) {
+      return(i)
+    }
+  }
+  0L
+}
+
+# Does any of the quosures (or one expression) call min()/max() with a `na.rm`
+# argument anywhere? (The cheap syntactic screen before narm_minmax_dot()'s parse.)
+# @keywords internal
+expr_has_minmax_na_rm <- function(x) {
+  if (rlang::is_missing(x)) {
+    return(FALSE)
+  }
+  # (recursing, so an embedded unsupplied `{{ arg }}` is tested as missing too)
+  if (rlang::is_quosure(x)) {
+    return(expr_has_minmax_na_rm(rlang::quo_get_expr(x)))
+  }
+  if (is.list(x) && !is.call(x)) {
+    return(any(vapply(x, expr_has_minmax_na_rm, logical(1))))
+  }
+  if (!is.call(x)) {
+    return(FALSE)
+  }
+  head <- call_head_name(x)
+  if (!is.null(head) && head %in% c("min", "max") && "na.rm" %in% names(x)) {
+    return(TRUE)
+  }
+  for (i in seq_along(x)[-1L]) {
+    if (expr_has_minmax_na_rm(x[[i]])) {
+      return(TRUE)
+    }
+  }
+  FALSE
 }
 
 # Compute the computed grouping keys `comp_dots` (a named list of quosures) of
@@ -570,6 +634,13 @@ add_count.tbl_gpu <- function(x, ..., wt = NULL, sort = FALSE, name = NULL, .dro
   }
   working <- resolved$data
   dot_names <- resolved$names
+
+  # (#74, narm_key_reason: the mutate() below would name itself)
+  if (narm_minmax_dot(list(wt_quo), current_schema(working)) > 0L) {
+    return(gpu_fallback("add_count", x, function(tbl) {
+      dplyr::add_count(tbl, !!!dots, wt = !!wt_quo, sort = sort, name = name)
+    }, reason = narm_key_reason, expr = notice_expr_text(wt_quo)))
+  }
 
   grouped <- if (length(dot_names) > 0) {
     dplyr::group_by(working, !!!rlang::syms(dot_names), .add = TRUE)

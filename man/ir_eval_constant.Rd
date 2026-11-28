@@ -4,7 +4,7 @@
 \alias{ir_eval_constant}
 \title{Evaluate a raw (unparsed) expression as a constant in \code{env}}
 \usage{
-ir_eval_constant(raw_expr, env)
+ir_eval_constant(raw_expr, env, allow_int64 = FALSE)
 }
 \arguments{
 \item{raw_expr}{A language object (not a quosure)}
