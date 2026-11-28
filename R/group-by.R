@@ -154,10 +154,10 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
   # only dplyr can resolve (pick() inside wrappers, across(), a named pick()
   # that makes a df-column, ...). Always reruns the ORIGINAL call, from the
   # original `.data`, so nothing half-applied leaks.
-  group_by_fallback <- function(reason) {
+  group_by_fallback <- function(reason, expr = NA_character_) {
     gpu_fallback("group_by", .data, function(tbl) {
       dplyr::group_by(tbl, !!!dots, .add = .add, .drop = .drop)
-    }, reason = reason)
+    }, reason = reason, expr = expr)
   }
 
   # F77: a computed group whose call head resolves to a function of the user's
@@ -259,8 +259,10 @@ group_by.tbl_gpu <- function(.data, ..., .add = FALSE,
     # quosure's `k`, see the splice rule after pronoun_call_name(), R/ir.R)
     # (its error names an unnamed dot as the user wrote it)
     unnamed <- !is_named[is_comp] & !unbound_ref[is_comp]
-    if (expr_has_minmax_na_rm(comp_dots)) {
-      return(group_by_fallback("a min()/max() with na.rm in a computed key warns in dplyr's own verb."))
+    # (#74, narm_key_reason)
+    narm_dot <- narm_minmax_dot(comp_dots, current_schema(working))
+    if (narm_dot > 0L) {
+      return(group_by_fallback(narm_key_reason, notice_expr_text(comp_dots[[narm_dot]])))
     }
     working <- withCallingHandlers(
       dplyr::mutate(dplyr::ungroup(working), !!!comp_dots),

@@ -123,7 +123,9 @@
 #' functions [mutate.tbl_gpu()] runs on the GPU), and the aggregation then
 #' reduces that per-row result, as dplyr does. This applies to the argument
 #' of one aggregation; several aggregation calls in one expression are
-#' combined as described in the next section.
+#' combined as described in the next section. One exception: an argument
+#' holding `min()`/`max(x, na.rm = TRUE)` (`mean(v / max(v, na.rm = TRUE))`)
+#' is left to dplyr, which warns for a group with no value left.
 #'
 #' ## Arithmetic around reducers
 #' An expression may combine reducer calls with arithmetic, comparisons, math

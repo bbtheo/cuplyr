@@ -58,7 +58,8 @@ minmax_ctx <- function(ir_cache) {
 # The call head the verb was called by (`summarise`, `summarize`,
 # `dplyr::mutate`): the head of the call of its dplyr generic, the frame under
 # the S3 method's (R rewrites the head of the method's own call to the method
-# name): dplyr names the call as written. `frame` is the method's frame number
+# name): dplyr names the call as written, or the one a caller marked for it
+# (minmax_marked_call(): `add_tally()`). `frame` is the method's frame number
 # as its helper saw it (sys.parent()), so the usual call reads two frames; a
 # caller that is not the method (an internal rerun) is looked for down the
 # stack. The method's frame is known by the `.Generic` UseMethod() defines in
@@ -79,12 +80,53 @@ minmax_verb_head <- function(default, frame = NA_integer_) {
       return(as.name(default))
     }
   }
-  head <- sys.call(frame - 1L)[[1L]]
+  head <- minmax_marked_call(frame)
+  head <- if (is.null(head)) sys.call(frame - 1L)[[1L]] else head[[1L]]
   if (is.symbol(head) ||
       (is.call(head) && length(head) == 3L && identical(head[[1L]], quote(`::`)))) {
     return(head)
   }
   as.name(default)
+}
+
+# The call dplyr names instead of the verb's own, as dplyr_error_call() finds it
+# from the method's frame `frame` (#74): a `.__dplyr_error_call__.` binding in
+# the frame that called the verb (dplyr_local_error_call(): add_tally() calling
+# mutate(), add_count() calling add_tally()), followed while the frame it points
+# at has a caller with one. The call of the frame it ends at (of its generic,
+# for an S3 method), or the bound call itself; NULL when nothing is bound.
+# @keywords internal
+minmax_marked_call <- function(frame) {
+  parents <- sys.parents()
+  call <- NULL
+  k <- frame
+  repeat {
+    p <- parents[[k]]
+    marker <- if (p > 0L) get0(".__dplyr_error_call__.", envir = sys.frame(p), inherits = FALSE)
+    if (is.null(marker)) {
+      break
+    }
+    if (!is.environment(marker)) {
+      # (a call, or anything else dplyr would format as one)
+      return(if (is.call(marker)) marker)
+    }
+    k <- 0L
+    for (j in rev(seq_len(p))) {
+      if (identical(sys.frame(j), marker)) {
+        k <- j
+        break
+      }
+    }
+    if (k == 0L) {
+      return(NULL)
+    }
+    call <- if (k > 1L && !is.null(get0(".Generic", envir = marker, inherits = FALSE))) {
+      sys.call(k - 1L)
+    } else {
+      sys.call(k)
+    }
+  }
+  call
 }
 
 # Is frame `i` a method UseMethod() dispatched for the dplyr generic `generic`?
@@ -1034,7 +1076,7 @@ lower_window_narm_warn <- function(narm, input_ptr, input_schema, groups) {
   uniq <- unique(pair)
   first <- match(uniq, pair)
   k <- length(uniq)
-  group_idx <-if (length(groups) > 0L) match(groups, input_schema$names) - 1L else integer()
+  group_idx <- if (length(groups) > 0L) match(groups, input_schema$names) - 1L else integer()
   res <- gpu_summarise(
     input_ptr, group_idx,
     match(vapply(calls[first], `[[`, character(1), "value_col"), input_schema$names) - 1L,

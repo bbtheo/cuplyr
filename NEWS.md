@@ -4,10 +4,10 @@
   `filter()`, `min()`/`max(x, na.rm = TRUE)` of a double in `mutate()`
   (`filter()` leaves that one to dplyr), `row_number(x)` and `ntile(x, n)` inside
   `order_by()`/`with_order()`, integer64 `%in%`, `first()`/`last()`/`nth()`,
-  `n_distinct()`, `percent_rank()`, `cume_dist()` and `lag()`/`lead()` with a
-  non-`NA` `default`, and a type-based `across(where(...))` after `n()`,
-  `row_number()`, `ntile()`, `year()` or `roll_*()` in the same `mutate()`
-  now run on the GPU instead of the CPU. `min()`/`max(x, na.rm = TRUE)` of an
+  `n_distinct()`, `percent_rank()`, `cume_dist()` and `lag()`/`lead()` with an
+  integer64 or integer `default` (a double `default` stays on the CPU), and a
+  type-based `across(where(...))` after `n()`, `row_number()`, `ntile()`,
+  `year()` or `roll_*()` in the same `mutate()` now run on the GPU instead of the CPU. `min()`/`max(x, na.rm = TRUE)` of an
   all-`NA` group gives `Inf`/`-Inf` with dplyr's warning, as in dplyr (#74).
 
 * lubridate's `year()`, `month()`, `yday()` and `wday()` on a `tbl_gpu` now

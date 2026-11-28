@@ -144,3 +144,70 @@ test_that("#74: explain() shows the frame of a row_number(x) under order_by()", 
   q2 <- mutate(lz, m = max(v, na.rm = TRUE), .by = g)
   expect_match(paste(utils::capture.output(show_query(q2)), collapse = "\n"), "max(v, na.rm = TRUE)", fixed = TRUE)
 })
+
+# ---- round 3: the verb dplyr's warning names, and the keys that stay native ----
+
+test_that("#74: an unsupplied {{ arg }} in a computed key or `wt` does not break the key check", {
+  skip_if_no_gpu()
+  df <- tibble::tibble(g = c(2L, 1L, 2L, 1L), a = c(1, 2, 3, 2))
+  ignore <- function(x) 1
+  p74_parity(df, function(d, var) group_by(d, g2 = ignore({{ var }})))
+  p74_parity(df, function(d, var) group_by(d, ignore({{ var }})))
+  p74_parity(df, function(d, var) count(d, g2 = ignore({{ var }})))
+  p74_parity(df, function(d, var) distinct(d, g2 = ignore({{ var }})))
+  p74_parity(df, function(d, w) add_count(d, g, wt = ignore({{ w }})))
+  # (the check itself, on an embedded quosure of a missing argument)
+  f <- function(var) rlang::quo(ignore({{ var }}))
+  expect_false(expr_has_minmax_na_rm(f()))
+  expect_false(expr_has_minmax_na_rm(list(f(), f())))
+})
+
+test_that("#74: add_tally()'s min()/max(na.rm = TRUE) in `wt` warns in `add_tally()`", {
+  skip_if_no_gpu()
+  df <- tibble::tibble(g = c(1L, 1L, 2L, 2L, 3L), v = c(1, 2, NA, NaN, 5))
+  # dplyr's add_tally() is no generic: it marks its frame, then calls mutate()
+  p74_native_warn(df, function(d) add_tally(group_by(d, g), wt = v / max(v, na.rm = TRUE)))
+  p74_native_warn(df, function(d) dplyr::add_tally(group_by(d, g), wt = v - min(v, na.rm = TRUE)))
+  # a plain mutate() still names itself
+  p74_native_warn(df, function(d) mutate(group_by(d, g), n = sum(v / max(v, na.rm = TRUE), na.rm = TRUE)))
+})
+
+test_that("#74: the native warning for an NA-only column and next to a lazy filter", {
+  skip_if_no_gpu()
+  # all-NA group without a NaN anywhere (the whole-column sum is NA)
+  df <- tibble::tibble(g = c(1L, 1L, 2L, 2L, 3L), v = c(1, NA, NA, NA, 5))
+  p74_native_warn(df, function(d) mutate(d, m = max(v, na.rm = TRUE), lo = min(v, na.rm = TRUE), .by = g))
+  # the group is all NA only after the filter: the warning is over the filtered rows
+  df2 <- tibble::tibble(g = c(1L, 1L, 2L, 2L, 3L, 3L), v = c(1, 2, NA, 7, 5, NA), k = c(1, 1, 1, 0, 1, 1))
+  p74_native_warn(df2, function(d) mutate(filter(d, k == 1), m = max(v, na.rm = TRUE), .by = g))
+})
+
+test_that("#74: a key whose min()/max() has no na.rm = TRUE call left stays on the GPU", {
+  skip_if_no_gpu()
+  df <- tibble::tibble(g = c(1L, 1L, 2L, 2L, 3L), v = c(1, 2, NA, NaN, 5), x = c(1, 2, 3, 4, 5))
+  # a column-free call folds to a constant; na.rm = FALSE is the plain call
+  p74_native(df, function(d) group_by(d, k = x > max(c(1, NA), na.rm = TRUE)))
+  p74_native(df, function(d) group_by(d, k = max(v, na.rm = FALSE)))
+  p74_native(df, function(d) count(d, k = x > max(c(1, NA), na.rm = TRUE)))
+  p74_native(df, function(d) distinct(d, k = max(x, na.rm = FALSE)))
+  p74_native(df, function(d) add_count(d, g, wt = x > max(c(1, NA), na.rm = TRUE)))
+})
+
+test_that("#74: a key's min()/max(na.rm = TRUE) on the CPU names the key in its notice", {
+  skip_if_no_gpu()
+  df <- tibble::tibble(g = c(1L, 1L, 2L), v = c(NA, NA, NA_real_), x = c(1, 2, 3))
+  verbs <- list(
+    function(d) group_by(d, max(v, na.rm = TRUE)),
+    function(d) group_by(d, k = x - min(v, na.rm = TRUE)),
+    function(d) count(d, max(v, na.rm = TRUE)),
+    function(d) distinct(d, k = x - min(v, na.rm = TRUE)),
+    function(d) add_count(d, g, wt = max(v, na.rm = TRUE))
+  )
+  for (p in verbs) {
+    oracle <- p74_parity(df, p)
+    got <- f124_capture(p(tbl_gpu(df)))
+    expect_length(got$fallback, 1L)
+    expect_match(got$fallback, "for: [^\n]*(max|min)\\(v, na.rm = TRUE\\)", info = got$fallback)
+    expect_no_match(got$fallback, "for: (group_by|count|distinct|add_count)\\(\\)")
+  }
+})
