@@ -1707,6 +1707,30 @@ names: it would not catch an alias of a timer or a renamed field), and that ever
 `callr` child started from tests/testthat goes through `gpu_child_r()`; children the
 bench/ code starts are not scanned.
 
+### How the suite runs (`tools/run-tests.R`, `tools/run-tests-lib.R`)
+`tools/test` and the merge gate call `Rscript tools/run-tests.R suite` inside
+one `tools/gpu-run` hold. `--shards 1` runs every file in this process in
+byte-order name order (what the runner always did). With more shards (default 4,
+`CUPLYR_TEST_SHARDS`, at most a third of the cores) the parent never loads the
+package (no GPU context of its own): it runs `cuplyr_ensure_optimized_dll()` once,
+plans with `suite_plan()` (files not in `tools/test-serial.txt`, longest first by
+`tools/test-durations.tsv`, each to the least loaded shard, ties by name and lowest
+index), starts one `Rscript tools/run-tests.R shard ...` child per shard (processx,
+output to a log per child; children inherit `CUPLYR_GPU_LOCK_HELD` and never take
+the lock), polls every second for liveness and the peak of `nvidia-smi` memory.used
+and host MemTotal - MemAvailable, then runs the serial-listed files in one more
+child once every shard has exited. A child writes `started <file>` before each
+file and the file's entry (rows, seconds) after it; the parent treats a file
+without an entry as unfinished whatever the exit status was, gives it an `error`
+row ("shard N stopped while running this file" or "not run: shard N died"), and
+prints every child's log. The merged `--out` table is in file-name order, tests in
+file order, with `seconds` (testthat's per-test `real`), `file_seconds` and `shard`
+after `file test status`. Shard children load with `compile = FALSE` and with
+`options(cuplyr.pool_initial = 0, cuplyr.release_threshold = 512 MiB)` set only
+around `load_all()` (the resource reads them once, in `.onLoad`; options, not
+environment variables, so the tests' own callr children keep the defaults); the
+serial phase runs with the defaults. `perf` and `file` mode stay in one process.
+
 ### Test Pattern
 ```r
 test_that("operation handles edge case", {

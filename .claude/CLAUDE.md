@@ -93,7 +93,7 @@ work around a block; if a rule stops legitimate work, say so in your report.
 | `tools/test-file <file>... [--out f.tsv]` | yes | Run specific test files. |
 | `tools/r '<R expr>'` | yes | Ad-hoc R with the package loaded and dplyr attached. |
 | `tools/document` | yes | Regenerate NAMESPACE, man/, Rcpp exports. |
-| `tools/test [--out f.tsv]` | yes | Full testthat suite. Tester agents only. |
+| `tools/test [--out f.tsv] [--shards N] [--record-durations f.tsv]` | yes | Full testthat suite, in parallel shards inside the one lock hold, then the files in `tools/test-serial.txt` alone; prints the slowest files and a `PEAK:` line (GPU and host memory). `CUPLYR_TEST_SHARDS` or `--shards` sets the count (default 4); `--shards 1` is the one-process run; `tools/test-durations.tsv` steers the split, refresh it with `--shards 1 --record-durations`. Tester agents only. |
 | `tools/perf [--out f.tsv]` | yes | Perf gate (`CUPLYR_PERF=1`, max ratio 1.5 vs the main checkout's baseline). Tester agents only. |
 | `tools/perf-baseline-set [--baseline f] <id>=<s>...` | merge.lock | Raise (or lower) perf baseline entries by hand. Theo only; `tools/merge-queue` runs `tools/perf-ratchet` itself. |
 | `tools/conformance [files] [--ids f.tsv] [--report f.md]` | yes | dplyr's own vendored test suite run against `tbl_gpu`. Tester agents only. |
@@ -117,6 +117,12 @@ terminal in the main checkout.
   pipeline, ...)` / `expect_same_as_dplyr_lazy()` (`tests/testthat/helper-oracle.R`).
   Use `arrange_by =` only where dplyr itself doesn't define row order.
 - Compare eager and lazy results through `tibble::as_tibble()`.
+- The suite runs in parallel shards (several R processes at once). A new test
+  file that asserts a wall-clock time, asserts GPU memory amounts or needs
+  >= 1 GB free (a `skip_if_insufficient_gpu_memory()` skip would hide a result
+  beside the shards), or reads the process's memory-resource configuration goes
+  on `tools/test-serial.txt` with a `# reason`. Never use the list to hide a file
+  that only passes alone or in a particular order: report that as a bug.
 - `test-memory-regression.R` measures GPU memory deltas and is sensitive to
   other GPU activity; that is one reason everything runs under the lock.
 

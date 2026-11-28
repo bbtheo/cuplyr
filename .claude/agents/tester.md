@@ -37,6 +37,13 @@ Run them one after another, never in parallel, each as a foreground Bash
 call with `timeout: 600000`. Each run waits for the GPU lock on its own; the
 wait can be minutes if another feature's gate is running.
 
+`WT/tools/test` runs the suite in parallel shards and takes a fraction of the old
+time; its log has one section per shard, a `SLOWEST` block and a `PEAK:` line.
+When the prompt asks for a serial reference or fresh durations, run
+`WT/tools/test --shards 1 --record-durations RUN_DIR/durations.tsv --out RUN_DIR/serial.tsv`
+(about 40 minutes: run it in the background and wait for it); when it asks for
+several sharded runs, give each its own `--out RUN_DIR/sharded-<k>.tsv`.
+
 If `test-memory-regression.R` is the only failure, rerun just that file once
 and report both results. Don't rerun anything else.
 
@@ -53,7 +60,7 @@ from the files and not estimated:
 RUN_DIR: <path>
 LOCK_WAIT: <seconds, from the "[gpu-run] lock acquired after" lines>
 ACCEPTANCE: <pass>/<fail>/<error>/<skip>
-SUITE: <pass>/<fail>/<error>/<skip>
+SUITE: <pass>/<fail>/<error>/<skip>  (plus the wall seconds and the PEAK: line copied as is)
 PERF: PASS|FAIL  <failing benchmark ids and ratios if any>
 CONFORMANCE: <pass>/<fail>/<error>/<skip> over <files>
 FAILING:
