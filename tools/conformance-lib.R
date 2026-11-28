@@ -762,14 +762,15 @@ cf_make_shim_env <- function(state, upload = TRUE) {
     if (inherits(object, "tbl_gpu") && !all(class == "tbl_gpu")) {
       # Same rule as class(): the classes the tbl_gpu carries in front of
       # "tbl_gpu" come in front of the collected class (collect() never carries
-      # them), so a test that prepended a subclass sees it.
+      # them), so a test that prepended a subclass sees it. When collect()
+      # failed, `o` is still the raw tbl_gpu and already carries them.
       extra <- cf_extra_classes(object)
       # Same rule as expect_equal(): a result compared against exactly a bare
       # data.frame class is compared as the bare data.frame (the tibble class of
       # a collected result is a harness artifact, the fixture was a data.frame).
       # With a subclass, class() reports it in front of "data.frame".
       if (isTRUE(exact) && identical(class, c(extra, "data.frame"))) o <- cf_as_bare(o)
-      if (length(extra) > 0L) base::class(o) <- c(extra, base::class(o))
+      if (length(extra) > 0L && !inherits(o, "tbl_gpu")) base::class(o) <- c(extra, base::class(o))
     }
     testthat::expect_s3_class(o, class, ..., exact = exact)
   }
