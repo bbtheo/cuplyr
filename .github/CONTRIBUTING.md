@@ -230,16 +230,24 @@ tools/check-deprecations
 CUPLYR_PIXI_ENV=rapids2602 tools/check-deprecations
 ```
 
-Two things to know about what it reports:
+Three things to know about what it reports:
 
 - It fails on any deprecated declaration reached from a non-system header, not
   only libcudf and RMM ones: an R, Rcpp or CUDA header deprecating something
   cuplyr calls turns it red as well. The fix is the same, move to the
   replacement (or, if only one RAPIDS series has it, a wrapper in
   `src/cuplyr_compat.hpp`).
-- A deprecated *header* (a `#pragma GCC warning`, as RMM 26.02's
-  `cuda_stream_view.hpp` raises) is listed in the summary but does not fail the
-  check: it is RAPIDS's own include, not a call cuplyr makes.
+- A deprecated *header* (a `#pragma GCC warning`, such as CCCL's
+  `<cuda/stream_ref>` that RMM's headers include on RAPIDS 26.02) is listed in
+  the summary but never fails the check, even when cuplyr includes that header
+  directly. So whoever moves cuplyr to a new RAPIDS release should read the
+  list and replace any header cuplyr includes itself before it is removed.
+- A pass means the check really ran: it fails if a compile command lacks
+  `-Werror=deprecated-declarations`, if a later flag cancels it (`-w`,
+  `-Wno-deprecated-declarations`, `-Wno-error=deprecated-declarations` and the
+  like, say from `~/.R/Makevars`), or if `./configure` found a libcudf other
+  than the active environment's (a valid `CUDF_HOME` takes precedence over
+  `CONDA_PREFIX`).
 
 The pre-merge gate runs it first, and `tools/check` builds with the switch on.
 

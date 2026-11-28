@@ -4,8 +4,9 @@
 #   tools/check [--out DIR] [R CMD check args...]
 #
 # Builds the source tarball with scripts/build-tarball.sh, then runs
-# R CMD check on it with the same settings as `pixi run check`
-# (_R_CHECK_FORCE_SUGGESTS_=false, --no-manual --ignore-vignettes); extra
+# R CMD check on it with the check settings of `pixi run check`
+# (_R_CHECK_FORCE_SUGGESTS_=false, --no-manual --ignore-vignettes), plus the
+# deprecation switch below, which that task does not set; extra
 # arguments go to R CMD check (e.g. --as-cran). The check installs the package
 # only into its own DIR/cuplyr.Rcheck/ library, never into a user or site
 # library. DIR defaults to scratchpad/check/ in this worktree (gitignored); the
