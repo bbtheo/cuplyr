@@ -124,20 +124,20 @@ All cuplyr options, and how an invalid value is handled, are listed on
 }
 
 \examples{
-if (has_gpu()) {
-  # Check memory before allocation
-  before <- gpu_memory_state()
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
+# Check memory before allocation
+before <- gpu_memory_state()
 
-  # Allocate some GPU data
-  gpu_df <- tbl_gpu(data.frame(x = runif(1000000)))
+# Allocate some GPU data
+gpu_df <- tbl_gpu(data.frame(x = runif(1000000)))
 
-  # Check memory after allocation
-  after <- gpu_memory_state()
+# Check memory after allocation
+after <- gpu_memory_state()
 
-  cat("Memory used:", after$used_gb - before$used_gb, "GB\n")
-  cat("Allocated from the resource:",
-      after$pool_used_bytes - before$pool_used_bytes, "bytes\n")
-}
+cat("Memory used:", after$used_gb - before$used_gb, "GB\n")
+cat("Allocated from the resource:",
+    after$pool_used_bytes - before$pool_used_bytes, "bytes\n")
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link{gpu_details}} for device information (device level only),

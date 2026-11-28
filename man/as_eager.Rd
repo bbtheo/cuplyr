@@ -17,13 +17,13 @@ Computes any pending operations and returns a \code{tbl_gpu} that will
 execute all subsequent operations immediately.
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  # Tables are lazy by default; switch to eager mid-pipeline
-  result <- tbl_gpu(mtcars) |>
-    filter(mpg > 20) |>
-    as_eager() |>
-    mutate(x = hp * 2) |>  # executes immediately
-    collect()
-}
+# Tables are lazy by default; switch to eager mid-pipeline
+result <- tbl_gpu(mtcars) |>
+  filter(mpg > 20) |>
+  as_eager() |>
+  mutate(x = hp * 2) |>  # executes immediately
+  collect()
+\dontshow{\}) # examplesIf}
 }

@@ -44,8 +44,8 @@ only the structural facts (row count, column count, grouping, column
 names, and column types) are guaranteed to match.
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  tbl_gpu(mtcars) |> glimpse()
-}
+tbl_gpu(mtcars) |> glimpse()
+\dontshow{\}) # examplesIf}
 }

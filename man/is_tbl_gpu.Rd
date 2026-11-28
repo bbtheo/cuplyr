@@ -16,9 +16,9 @@ is_tbl_gpu(x)
 Checks whether an object inherits from the \code{tbl_gpu} class.
 }
 \examples{
-if (has_gpu()) {
-  gpu_df <- tbl_gpu(mtcars)
-  is_tbl_gpu(gpu_df)
-  is_tbl_gpu(mtcars)
-}
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
+gpu_df <- tbl_gpu(mtcars)
+is_tbl_gpu(gpu_df)
+is_tbl_gpu(mtcars)
+\dontshow{\}) # examplesIf}
 }

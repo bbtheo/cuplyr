@@ -16,11 +16,11 @@ Logical. \code{TRUE} if the table is in lazy execution mode.
 Check if a tbl_gpu uses lazy execution
 }
 \examples{
-if (has_gpu()) {
-  lazy_tbl <- tbl_gpu(mtcars)
-  is_lazy(lazy_tbl)   # TRUE
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
+lazy_tbl <- tbl_gpu(mtcars)
+is_lazy(lazy_tbl)   # TRUE
 
-  eager_tbl <- tbl_gpu(mtcars, lazy = FALSE)
-  is_lazy(eager_tbl)  # FALSE
-}
+eager_tbl <- tbl_gpu(mtcars, lazy = FALSE)
+is_lazy(eager_tbl)  # FALSE
+\dontshow{\}) # examplesIf}
 }

@@ -7,13 +7,9 @@ vignette: >
   %\VignetteEncoding{UTF-8}
 ---
 
-```{r, include = FALSE}
-knitr::opts_chunk$set(
-  collapse = TRUE,
-  comment = "#>",
-  eval = identical(Sys.getenv("CUPLYR_VIGNETTE_EVAL"), "true") && cuplyr::has_gpu()
-)
-```
+<!-- Generated from memory.Rmd.orig by tools/vignettes-knit; edit that file instead. -->
+
+
 
 ## Introduction
 
@@ -27,7 +23,8 @@ This article covers the three ways cuplyr can allocate, how to switch between
 them, how to read what cuplyr holds, when memory is freed, and how to choose.
 It ends with numbers from one machine.
 
-```{r setup}
+
+``` r
 library(cuplyr)
 library(dplyr)
 ```
@@ -92,7 +89,8 @@ cuplyr warns about invalid values and falls back:
   default, cuplyr installs `"pool"`. If you asked for `"async"` by name, it
   installs no resource (`"cuda"`).
 
-```{r switch, eval = FALSE}
+
+``` r
 # In a fresh R session, before loading cuplyr:
 options(cuplyr.memory_resource = "pool")   # the pool instead of async
 # or: options(cuplyr.memory_resource = "cuda")  # plain cudaMalloc; same as
@@ -109,10 +107,14 @@ grows and caches as it needs.
 
 `gpu_memory_state()` reports the device and what cuplyr's resource holds.
 
-```{r state}
+
+``` r
 st <- gpu_memory_state()
 st$resource
+#> [1] "async"
 c(free = st$free_bytes, pool = st$pool_bytes, in_use = st$pool_used_bytes)
+#>        free        pool      in_use 
+#> 11586174976    33554432     1138378
 ```
 
 * `free_bytes`, `used_bytes` and `total_bytes` cover the whole device, every
@@ -129,10 +131,13 @@ c(free = st$free_bytes, pool = st$pool_bytes, in_use = st$pool_used_bytes)
 To see how big your tables are, read `pool_used_bytes`. To see how much of the
 card you take from others, read `pool_bytes` or `free_bytes`.
 
-```{r usage}
+
+``` r
 gpu_df <- tbl_gpu(data.frame(x = runif(1e6)), lazy = FALSE)
 gpu_memory_usage(gpu_df)  # estimate from dimensions and types
+#> [1] 8125000
 gpu_memory_state()$pool_used_bytes
+#> [1] 9138378
 ```
 
 `gpu_memory_usage()` estimates a table's size from its row count and column
@@ -158,10 +163,13 @@ types without touching the device. Tables that share columns, such as a
    `gpu_gc(aggressive = FALSE)` and retries the step once. A second failure
    raises an error of class `cuplyr_error_gpu_oom`.
 
-```{r gc}
+
+``` r
 rm(gpu_df)
 res <- gpu_gc()
 c(freed = res$freed_bytes, released = res$released_bytes)
+#>    freed released 
+#>  9138378 33554432
 ```
 
 ## How to choose
@@ -232,7 +240,8 @@ fresh session started with `CUPLYR_MEMORY_RESOURCE=async`,
 `CUPLYR_MEMORY_RESOURCE=pool`, or `CUPLYR_MEMORY_POOL=0`, and take the median of
 a few runs.
 
-```{r measure, eval = FALSE}
+
+``` r
 library(cuplyr)
 library(dplyr)
 

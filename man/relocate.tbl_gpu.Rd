@@ -28,12 +28,12 @@ like \code{\link[=select.tbl_gpu]{select.tbl_gpu()}}; a rename (\code{relocate(d
 column names, like \code{\link[=rename.tbl_gpu]{rename.tbl_gpu()}}.
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  gpu_mtcars <- tbl_gpu(mtcars)
+gpu_mtcars <- tbl_gpu(mtcars)
 
-  result <- gpu_mtcars |>
-    relocate(hp, .after = mpg) |>
-    collect()
-}
+result <- gpu_mtcars |>
+  relocate(hp, .after = mpg) |>
+  collect()
+\dontshow{\}) # examplesIf}
 }

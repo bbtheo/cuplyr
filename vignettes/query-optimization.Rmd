@@ -7,13 +7,9 @@ vignette: >
   %\VignetteEncoding{UTF-8}
 ---
 
-```{r, include = FALSE}
-knitr::opts_chunk$set(
-  collapse = TRUE,
-  comment = "#>",
-  eval = identical(Sys.getenv("CUPLYR_VIGNETTE_EVAL"), "true") && cuplyr::has_gpu()
-)
-```
+<!-- Generated from query-optimization.Rmd.orig by tools/vignettes-knit; edit that file instead. -->
+
+
 
 cuplyr tables are lazy by default. A verb on a lazy table doesn't run. It adds
 a step to a plan that describes the query. When `compute()` or `collect()`
@@ -24,7 +20,8 @@ the optimizer never sees it.
 This article shows what the optimizer does. It doesn't time anything. For
 timings, see `vignette("performance", package = "cuplyr")`.
 
-```{r setup}
+
+``` r
 library(cuplyr)
 library(dplyr)
 ```
@@ -37,7 +34,8 @@ stands for. Neither runs anything. `explain(x)` prints the plan the optimizer
 will run. `show_query(x, optimized = FALSE)` prints the plan as you wrote it.
 `show_query(x)` prints the same text as `explain(x)`.
 
-```{r plan-example}
+
+``` r
 pipeline <- tbl_gpu(mtcars) |>
   filter(mpg > 20) |>
   mutate(power_ratio = hp / wt) |>
@@ -45,8 +43,22 @@ pipeline <- tbl_gpu(mtcars) |>
   arrange(desc(mpg))
 
 show_query(pipeline, optimized = FALSE)
+#> <cuplyr plan: as written>
+#> table on the GPU
+#>   columns read: all 11
+#> filter(mpg > 20)
+#> mutate(power_ratio = hp / wt)
+#> select(mpg, cyl, power_ratio)
+#> arrange(desc(mpg))
 
 explain(pipeline)
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: 4 of 11 (mpg, cyl, hp, wt)
+#> filter(mpg > 20)
+#> mutate(power_ratio = hp / wt)
+#> select(mpg, cyl, power_ratio)
+#> arrange(desc(mpg))
 ```
 
 The first line says which plan it is. The source line says where the rows come
@@ -98,51 +110,77 @@ Only `mpg`, `hp` and `wt` are read from the 11 columns of `mtcars` here, so the
 source line reads `columns read: 3 of 11 (mpg, hp, wt)`. The `select(mpg,
 power_ratio)` at the end is the one in the pipeline.
 
-```{r proj}
+
+``` r
 tbl_gpu(mtcars) |>
   mutate(power_ratio = hp / wt) |>
   select(mpg, power_ratio) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: 3 of 11 (mpg, hp, wt)
+#> mutate(power_ratio = hp / wt)
+#> select(mpg, power_ratio)
 ```
 
 ## Mutate fusion
 
 Three `mutate()` calls become one step:
 
-```{r fusion}
+
+``` r
 tbl_gpu(mtcars) |>
   mutate(a = hp + 10) |>
   mutate(b = wt * 2) |>
   mutate(c = a + b) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 11
+#> mutate(a = hp + 10, b = wt * 2, c = a + b)
 ```
 
 The fused step evaluates its expressions in the order you wrote them, each one
 seeing the columns the earlier ones left. That's dplyr's order, so `c` below
 uses the original `a` and `b`, as in dplyr:
 
-```{r fusion-order}
+
+``` r
 df <- tibble::tibble(a = 1, b = 2, hp = 3, wt = 4)
 
 tbl_gpu(df) |>
   mutate(c = a + b) |>
   mutate(a = hp + 10, b = wt * 2) |>
   collect()
+#> # A tibble: 1 × 5
+#>       a     b    hp    wt     c
+#>   <dbl> <dbl> <dbl> <dbl> <dbl>
+#> 1    13     8     3     4     3
 
 df |>
   mutate(c = a + b) |>
   mutate(a = hp + 10, b = wt * 2)
+#> # A tibble: 1 × 5
+#>       a     b    hp    wt     c
+#>   <dbl> <dbl> <dbl> <dbl> <dbl>
+#> 1    13     8     3     4     3
 ```
 
 Two mutates don't fuse when they hold more than 8 expressions together, or
 when the upper one reads more than 4 columns the lower one writes. Overwritten
 columns count as written. Here 5 + 4 expressions stay as two steps:
 
-```{r fusion-guard}
+
+``` r
 tbl_gpu(mtcars) |>
   mutate(e1 = mpg + 1, e2 = mpg + 2, e3 = mpg + 3, e4 = mpg + 4, e5 = mpg + 5) |>
   mutate(e6 = mpg + 6, e7 = mpg + 7, e8 = mpg + 8, e9 = mpg + 9) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 11
+#> mutate(e1 = mpg + 1, e2 = mpg + 2, e3 = mpg + 3, e4 = mpg + 4, e5 = mpg + 5)
+#> mutate(e6 = mpg + 6, e7 = mpg + 7, e8 = mpg + 8, e9 = mpg + 9)
 ```
 
 ## Dead-column pruning
@@ -150,11 +188,17 @@ tbl_gpu(mtcars) |>
 The `select()` keeps only `mpg` and `a`, so the `mutate()` keeps one of its
 three expressions:
 
-```{r dead-column}
+
+``` r
 tbl_gpu(mtcars) |>
   mutate(a = hp + 10, b = wt * 2, c = mpg * 2) |>
   select(mpg, a) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: 2 of 11 (mpg, hp)
+#> mutate(a = hp + 10)
+#> select(mpg, a)
 ```
 
 The pass runs after fusion, so it also prunes across `mutate()` calls that
@@ -172,21 +216,31 @@ fused. It keeps an unused expression in three cases:
 Here `y` is unused, but `a + b` is checked, so the step keeps both
 expressions:
 
-```{r dead-checked-int}
+
+``` r
 tbl_gpu(data.frame(a = 1:4, b = 4:1, x = 1)) |>
   mutate(y = a + b, w = x * 2) |>
   select(a, w) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 3
+#> mutate(y = a + b, w = x * 2)
+#> select(a, w)
 ```
 
 The pass also narrows `select()` steps. Here the first `select()` ends up
 keeping only `a`, like the second:
 
-```{r dead-select}
+
+``` r
 tbl_gpu(data.frame(a = 1:3, b = 1, c = 2)) |>
   select(a, b, c) |>
   select(a) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: 1 of 3 (a)
 ```
 
 ## Filter pushdown
@@ -206,20 +260,32 @@ A filter moves below the `mutate` under it unless the mutate:
 
 `mpg` exists before the mutate, so this filter moves:
 
-```{r pushdown-can}
+
+``` r
 tbl_gpu(mtcars) |>
   mutate(power_ratio = hp / wt) |>
   filter(mpg > 20) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 11
+#> filter(mpg > 20)
+#> mutate(power_ratio = hp / wt)
 ```
 
 The mutate creates `power_ratio`, so this one stays:
 
-```{r pushdown-cannot}
+
+``` r
 tbl_gpu(mtcars) |>
   mutate(power_ratio = hp / wt) |>
   filter(power_ratio > 50) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 11
+#> mutate(power_ratio = hp / wt)
+#> filter(power_ratio > 50)
 ```
 
 ### Past a select
@@ -228,11 +294,17 @@ A filter moves below a `select()` that keeps every column the filter reads.
 Here projection pruning drops `c` at the source, and the filter moves below
 the pipeline's `select()` but not below the pruning:
 
-```{r pushdown-select}
+
+``` r
 tbl_gpu(data.frame(a = 1:20, b = 1, c = 2)) |>
   select(b, a) |>
   filter(a > 10) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: 2 of 3 (a, b)
+#> filter(a > 10)
+#> select(b, a)
 ```
 
 A filter never moves below the pruning of a source or a `select()` that
@@ -245,34 +317,54 @@ after it stays put.
 Pushdown moves each filter below at most one step. Here the filter passes the
 `select()` but stops above the `mutate()`, even though it could pass that too:
 
-```{r pushdown-one-step}
+
+``` r
 tbl_gpu(data.frame(k = 1:20, a = 1, b = 2)) |>
   mutate(z = a + 1) |>
   select(k, a, z) |>
   filter(k > 10) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: 2 of 3 (k, a)
+#> mutate(z = a + 1)
+#> filter(k > 10)
+#> select(k, a, z)
 ```
 
 This is where fusion matters. Two mutates that fused count as one step, so the
 filter gets below both:
 
-```{r pushdown-fused}
+
+``` r
 tbl_gpu(mtcars) |>
   mutate(a = hp + 10) |>
   mutate(b = wt * 2) |>
   filter(mpg > 20) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 11
+#> filter(mpg > 20)
+#> mutate(a = hp + 10, b = wt * 2)
 ```
 
 With the 5 + 4 expressions from above, the mutates don't fuse and the filter
 gets below the top one only:
 
-```{r pushdown-unfused}
+
+``` r
 tbl_gpu(mtcars) |>
   mutate(e1 = mpg + 1, e2 = mpg + 2, e3 = mpg + 3, e4 = mpg + 4, e5 = mpg + 5) |>
   mutate(e6 = mpg + 6, e7 = mpg + 7, e8 = mpg + 8, e9 = mpg + 9) |>
   filter(mpg > 20) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 11
+#> mutate(e1 = mpg + 1, e2 = mpg + 2, e3 = mpg + 3, e4 = mpg + 4, e5 = mpg + 5)
+#> filter(mpg > 20)
+#> mutate(e6 = mpg + 6, e7 = mpg + 7, e8 = mpg + 8, e9 = mpg + 9)
 ```
 
 ### Into a join
@@ -280,7 +372,8 @@ tbl_gpu(mtcars) |>
 What moves depends on the join type and its arguments. The examples use two
 small tables:
 
-```{r join-data}
+
+``` r
 x <- tbl_gpu(data.frame(k = c(1, 2, 3, 4), a = c(5, 15, 25, 35)))
 y <- tbl_gpu(data.frame(k = c(1, 2, 2, 4), v = c(10, 20, 30, 40)))
 ```
@@ -288,8 +381,17 @@ y <- tbl_gpu(data.frame(k = c(1, 2, 2, 4), v = c(10, 20, 30, 40)))
 For `semi_join()` and `anti_join()` the whole filter moves into the left input.
 The right input's `columns read:` line shows projection pruning keeping only the key:
 
-```{r join-semi}
+
+``` r
 x |> semi_join(y, by = "k") |> filter(a > 10) |> explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 2
+#> filter(a > 10)
+#> semi_join(y, by = join_by(k))
+#>   y:
+#>     table on the GPU
+#>       columns read: 1 of 2 (k)
 ```
 
 For `inner_join()`, `left_join()` and `right_join()`, the default
@@ -299,8 +401,17 @@ the check only for joins whose conditions are all `==`, called from your own
 code. So with `relationship` and `multiple` left at their defaults, nothing
 moves:
 
-```{r join-default}
+
+``` r
 x |> inner_join(y, by = "k") |> filter(a > 10) |> explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 2
+#> inner_join(y, by = join_by(k))
+#>   y:
+#>     table on the GPU
+#>       columns read: all 2
+#> filter(a > 10)
 ```
 
 Joins dplyr doesn't check are recorded as `relationship = "many-to-many"`. That
@@ -308,10 +419,19 @@ covers inequality, `closest()`, `between()`, `overlaps()` and `within()`
 conditions, `by = character()`, and `==` joins called from inside a package.
 This filter moves although no argument is set:
 
-```{r join-inequality}
+
+``` r
 y_k2 <- tbl_gpu(data.frame(k2 = c(1, 2, 2, 4), v = c(10, 20, 30, 40)))
 
 x |> inner_join(y_k2, join_by(k >= k2)) |> filter(a > 10) |> explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 2
+#> filter(a > 10)
+#> inner_join(y, by = join_by(k >= k2))
+#>   y:
+#>     table on the GPU
+#>       columns read: all 2
 ```
 
 Nothing moves with `unmatched = "error"` or a `relationship` of
@@ -328,35 +448,74 @@ Nothing moves with `unmatched = "error"` or a `relationship` of
 
 In the left join, `v > 15` reads the right side, so it stays:
 
-```{r join-m2m}
+
+``` r
 x |>
   inner_join(y, by = "k", relationship = "many-to-many") |>
   filter(a > 10, v > 15) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 2
+#> filter(a > 10)
+#> inner_join(y, by = join_by(k), relationship = "many-to-many")
+#>   y:
+#>     table on the GPU
+#>       columns read: all 2
+#>     filter(v > 15)
 
 x |>
   left_join(y, by = "k", relationship = "many-to-many") |>
   filter(a > 10, v > 15) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 2
+#> filter(a > 10)
+#> left_join(y, by = join_by(k), relationship = "many-to-many")
+#>   y:
+#>     table on the GPU
+#>       columns read: all 2
+#> filter(v > 15)
 ```
 
 With `multiple = "first"`, `a > 10` still moves and `v > 15` stays:
 
-```{r join-multiple}
+
+``` r
 x |>
   inner_join(y, by = "k", relationship = "many-to-many", multiple = "first") |>
   filter(a > 10, v > 15) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 2
+#> filter(a > 10)
+#> inner_join(y, by = join_by(k), multiple = "first", relationship = "many-to-many")
+#>   y:
+#>     table on the GPU
+#>       columns read: all 2
+#> filter(v > 15)
 ```
 
 A `cross_join()` follows the inner join rules on both sides. A `full_join()`
 moves nothing.
 
-```{r join-cross}
+
+``` r
 x |>
   cross_join(y_k2) |>
   filter(a > 10, v > 15) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 2
+#> filter(a > 10)
+#> cross_join(y)
+#>   y:
+#>     table on the GPU
+#>       columns read: all 2
+#>     filter(v > 15)
 ```
 
 Checked integer arithmetic is stricter. dplyr computes every predicate of one
@@ -365,7 +524,8 @@ moves only into the left input of a left join or the right input of a right
 join, where every row reaches the output. In a semi, anti, inner or cross join
 it stays, and the rest of its `filter()` call stays with it:
 
-```{r join-checked-int}
+
+``` r
 x_i <- tbl_gpu(data.frame(k = 1:4, a = c(5, 15, 25, 35)))
 y_i <- tbl_gpu(data.frame(k = c(1L, 2L, 2L, 4L), v = c(10, 20, 30, 40)))
 
@@ -373,6 +533,14 @@ x_i |>
   inner_join(y_i, by = "k", relationship = "many-to-many") |>
   filter(a > 10, k + 1L > 2L) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 2
+#> inner_join(y, by = join_by(k), relationship = "many-to-many")
+#>   y:
+#>     table on the GPU
+#>       columns read: all 2
+#> filter(a > 10, k + 1L > 2L)
 ```
 
 ## Filter reordering
@@ -380,13 +548,18 @@ x_i |>
 A chain of `filter()` steps becomes one step. A filter step runs as one
 expression, its predicates joined with `&` into one row mask.
 
-```{r filter-reorder}
+
+``` r
 d <- data.frame(x = c(1, 5, 20, 30), y = c(0, 1, 2, 3), z = c(5, 11, 12, 1))
 
 tbl_gpu(d) |>
   filter(x > y) |>
   filter(z > 10) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 3
+#> filter(z > 10, x > y)
 ```
 
 The merged predicates are sorted cheapest first. The cost is the size of the
@@ -398,12 +571,18 @@ aren't deterministic are merged but not sorted.
 Reordering runs after pushdown, so filters that pushdown brings together are
 merged. Here the second filter moves below the mutate and joins the first:
 
-```{r filter-reorder-after-pushdown}
+
+``` r
 tbl_gpu(mtcars) |>
   filter(cyl > 4) |>
   mutate(r = hp / wt) |>
   filter(mpg > 15) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 11
+#> filter(mpg > 15, cyl > 4)
+#> mutate(r = hp / wt)
 ```
 
 Some filters don't merge:
@@ -417,11 +596,17 @@ Some filters don't merge:
 
 So this stays two steps:
 
-```{r filter-reorder-checked-int}
+
+``` r
 tbl_gpu(data.frame(a = 1:4, b = 4:1)) |>
   filter(a < 100L) |>
   filter(a + b > 0L) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 2
+#> filter(a < 100L)
+#> filter(a + b > 0L)
 ```
 
 ## Scan pushdown
@@ -451,12 +636,22 @@ uploaded again. The plan keeps what happened. It shows the verb, the
 expression, why it couldn't run on the GPU and the plan the step computed, and
 the steps after it follow:
 
-```{r cpu-step}
+
+``` r
 tbl_gpu(mtcars) |>
   filter(mpg > 20) |>
   mutate(p = pnorm(mpg / 10)) |>
   filter(p > 0.98) |>
   explain()
+#> <cuplyr plan: optimized>
+#> CPU fallback: mutate() for pnorm(mpg / 10)
+#>   reason: `pnorm()` has no GPU implementation.
+#>   columns read: all 12
+#>   input (computed at the mutate() call):
+#>     table on the GPU
+#>       columns read: all 11
+#>     filter(mpg > 20)
+#> filter(p > 0.98)
 ```
 
 The plan shows the newest three CPU steps; `compute()` of a table with pending
@@ -483,7 +678,8 @@ own, so no pass moves a step across a barrier. These steps are barriers:
 `head()` shows why. Filtering the first four rows is not the same as taking the
 first four rows that pass the filter:
 
-```{r barrier-head}
+
+``` r
 d <- data.frame(x = 1:10, y = c(-1, 2, -3, 4, -5, 6, -7, 8, -9, 10))
 
 q <- tbl_gpu(d) |>
@@ -492,12 +688,18 @@ q <- tbl_gpu(d) |>
   filter(y > 0)
 
 explain(q)
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 2
+#> slice_min(x, n = 4, with_ties = FALSE)  # top-k: arrange() |> head()
+#> filter(y > 0)
 
 all.equal(
   as.data.frame(collect(q)),
   d |> arrange(x) |> head(4) |> filter(y > 0),
   check.attributes = FALSE
 )
+#> [1] TRUE
 ```
 
 The plan has no `arrange()` step. `head(n)` directly on an ungrouped
@@ -514,7 +716,8 @@ everything above it read, but it keeps every `mutate` expression, because dplyr
 would compute them. Here each filter moves below its own mutate, and
 `arrange()` stays between them:
 
-```{r segments}
+
+``` r
 d <- data.frame(a = c(5, 12, 20, 30), c = c(1, 6, 7, 8))
 
 q <- tbl_gpu(d) |>
@@ -525,6 +728,14 @@ q <- tbl_gpu(d) |>
   filter(c > 5)
 
 explain(q)
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 2
+#> filter(a > 10)
+#> mutate(b = a + 1)
+#> arrange(b)
+#> filter(c > 5)
+#> mutate(d = c + 1)
 ```
 
 A join and its two inputs form one segment, together with the steps above it up
@@ -532,7 +743,8 @@ to the next barrier. The passes don't split a join's inputs at barriers, so
 column pruning can reach below a barrier there. Projection pruning drops `b`
 below `arrange()` in the left input:
 
-```{r barrier-in-join}
+
+``` r
 d2 <- tbl_gpu(data.frame(k = c(1, 2, 3, 4), a = c(5, 15, 25, 35), b = 1:4))
 y2 <- tbl_gpu(data.frame(k = c(1, 2, 2, 4), v = c(10, 20, 30, 40)))
 
@@ -541,23 +753,41 @@ d2 |>
   inner_join(y2, by = "k", relationship = "many-to-many") |>
   select(k, v) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: 2 of 3 (k, a)
+#> arrange(a)
+#> inner_join(y, by = join_by(k), relationship = "many-to-many")
+#>   y:
+#>     table on the GPU
+#>       columns read: all 2
+#> select(k, v)
 ```
 
 To stop the optimizer at a point of your choosing, put `collapse()` there. Here
 the two filters aren't merged and neither crosses it:
 
-```{r tip-collapse}
+
+``` r
 tbl_gpu(data.frame(x = c(5, 11, 20), z = c(1, 6, 9))) |>
   filter(x > 10) |>
   mutate(y = x * 2) |>
   collapse() |>
   filter(z > 5) |>
   explain()
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: all 2
+#> filter(x > 10)
+#> mutate(y = x * 2)
+#> collapse()
+#> filter(z > 5)
 ```
 
 ## A longer pipeline
 
-```{r example-complex}
+
+``` r
 pipeline <- tbl_gpu(mtcars) |>
   mutate(
     power_to_weight = hp / wt,
@@ -571,8 +801,27 @@ pipeline <- tbl_gpu(mtcars) |>
   arrange(desc(avg_score))
 
 explain(pipeline)
+#> <cuplyr plan: optimized>
+#> table on the GPU
+#>   columns read: 4 of 11 (mpg, cyl, hp, wt)
+#> filter(cyl %in% c(4, 6), mpg > 18)
+#> mutate(
+#>   power_to_weight = hp / wt,
+#>   fuel_efficiency = mpg / cyl,
+#>   is_powerful = hp > 150
+#> )
+#> select(cyl, power_to_weight, fuel_efficiency)
+#> mutate(efficiency_score = fuel_efficiency * power_to_weight)
+#> group_by(cyl)
+#> summarise(avg_score = mean(efficiency_score), count = n())
+#> arrange(desc(avg_score))
 
 collect(pipeline)
+#> # A tibble: 2 × 3
+#>     cyl avg_score count
+#>   <dbl>     <dbl> <int>
+#> 1     4      255.    11
+#> 2     6      136.     6
 ```
 
 The filter moved below the first mutate, so the three new columns are computed

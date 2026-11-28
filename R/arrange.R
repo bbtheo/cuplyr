@@ -55,32 +55,30 @@
 #' @export
 #' @importFrom dplyr arrange desc
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
+#' gpu_mtcars <- tbl_gpu(mtcars)
 #'
-#'   # Sort by single column (ascending)
-#'   sorted <- gpu_mtcars |>
-#'     arrange(mpg) |>
-#'     collect()
+#' # Sort by single column (ascending)
+#' sorted <- gpu_mtcars |>
+#'   arrange(mpg) |>
+#'   collect()
 #'
-#'   # Sort descending
-#'   sorted_desc <- gpu_mtcars |>
-#'     arrange(desc(mpg)) |>
-#'     collect()
+#' # Sort descending
+#' sorted_desc <- gpu_mtcars |>
+#'   arrange(desc(mpg)) |>
+#'   collect()
 #'
-#'   # Multiple columns: primary and secondary sort keys
-#'   sorted_multi <- gpu_mtcars |>
-#'     arrange(cyl, desc(mpg)) |>
-#'     collect()
+#' # Multiple columns: primary and secondary sort keys
+#' sorted_multi <- gpu_mtcars |>
+#'   arrange(cyl, desc(mpg)) |>
+#'   collect()
 #'
-#'   # With grouped data
-#'   grouped_sort <- gpu_mtcars |>
-#'     group_by(cyl) |>
-#'     arrange(mpg, .by_group = TRUE) |>
-#'     collect()
-#' }
+#' # With grouped data
+#' grouped_sort <- gpu_mtcars |>
+#'   group_by(cyl) |>
+#'   arrange(mpg, .by_group = TRUE) |>
+#'   collect()
 arrange.tbl_gpu <- function(.data, ..., .by_group = FALSE, .locale = NULL) {
   if (!is.null(.subset2(.data, "col_attrs")) && col_names_move(.data)) {
     return(rowwise_cpu(.data, "arrange", reason = col_names_reason(.data)))

@@ -52,11 +52,9 @@
 #' @export
 #' @importFrom dplyr glimpse
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   tbl_gpu(mtcars) |> glimpse()
-#' }
+#' tbl_gpu(mtcars) |> glimpse()
 glimpse.tbl_gpu <- function(x, width = NULL, ...) {
   width <- width %||% getOption("width", 80)
 

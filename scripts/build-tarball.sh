@@ -6,12 +6,14 @@ usage() {
 Build a package tarball from a staged copy (avoids local disk quota issues).
 
 Usage:
-  scripts/build-tarball.sh [--out-dir DIR] [--stage-dir DIR] [--keep-stage]
+  scripts/build-tarball.sh [--out-dir DIR] [--stage-dir DIR] [--keep-stage] [--build-vignettes]
 
 Options:
   --out-dir DIR    Directory for final tarball (default: <repo>, same as R CMD build .)
   --stage-dir DIR  Staging parent directory (default: /tmp)
   --keep-stage     Do not delete staged copy after build
+  --build-vignettes  Build the vignettes into the tarball (needs pandoc and
+                   installs the package once more); default skips them
   -h, --help       Show this help
 USAGE
 }
@@ -22,6 +24,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 OUT_DIR="${REPO_ROOT}"
 STAGE_PARENT="/tmp"
 KEEP_STAGE="false"
+BUILD_VIGNETTES="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -35,6 +38,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --keep-stage)
       KEEP_STAGE="true"
+      shift
+      ;;
+    --build-vignettes)
+      BUILD_VIGNETTES="true"
       shift
       ;;
     -h|--help)
@@ -85,7 +92,11 @@ find "${STAGE_PKG_DIR}" -xtype l -delete
 
 (
   cd "${STAGE_ROOT}"
-  R CMD build --no-build-vignettes --no-manual "${REPO_BASENAME}"
+  if [[ "${BUILD_VIGNETTES}" == "true" ]]; then
+    R CMD build --no-manual "${REPO_BASENAME}"
+  else
+    R CMD build --no-build-vignettes --no-manual "${REPO_BASENAME}"
+  fi
 )
 
 cp -f "${STAGE_ROOT}/${TARBALL_NAME}" "${OUT_DIR}/"

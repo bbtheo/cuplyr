@@ -697,8 +697,9 @@ test_that("the memory vignette exists and covers the resources", {
               "cuplyr_error_gpu_oom", "RTX 5070")) {
     expect_match(txt, s, fixed = TRUE, label = s)
   }
-  # GPU chunks must not run on a machine without a GPU.
-  expect_match(txt, "has_gpu()", fixed = TRUE)
+  # GPU chunks must not run on a machine without a GPU: the shipped vignette is
+  # precomputed (#138), so it has no chunk that could run.
+  expect_no_match(txt, "```{r", fixed = TRUE)
 })
 
 test_that("?gpu_memory_state links the vignette and NEWS documents the change", {

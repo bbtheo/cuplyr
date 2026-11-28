@@ -20,12 +20,12 @@ Results that are collected to R (\code{collect()}, \code{print()}) are already w
 for; this is for timing code that leaves its result on the GPU.
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  g <- tbl_gpu(data.frame(x = runif(1e6)), lazy = FALSE)
-  t0 <- Sys.time()
-  r <- dplyr::mutate(g, y = cumsum(x))
-  gpu_sync()
-  Sys.time() - t0
-}
+g <- tbl_gpu(data.frame(x = runif(1e6)), lazy = FALSE)
+t0 <- Sys.time()
+r <- dplyr::mutate(g, y = cumsum(x))
+gpu_sync()
+Sys.time() - t0
+\dontshow{\}) # examplesIf}
 }

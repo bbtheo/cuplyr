@@ -41,3 +41,4 @@
 ^bench/
 ^conda$
 ^conda/
+^vignettes/.*\.Rmd\.orig$

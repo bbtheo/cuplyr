@@ -71,25 +71,25 @@ memory usage and improve performance of subsequent operations.
 }
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  gpu_mtcars <- tbl_gpu(mtcars)
+gpu_mtcars <- tbl_gpu(mtcars)
 
-  # Select specific columns
-  result <- gpu_mtcars |>
-    select(mpg, cyl, hp) |>
-    collect()
+# Select specific columns
+result <- gpu_mtcars |>
+  select(mpg, cyl, hp) |>
+  collect()
 
-  # Select with tidyselect helpers
-  result <- gpu_mtcars |>
-    select(starts_with("d")) |>
-    collect()
+# Select with tidyselect helpers
+result <- gpu_mtcars |>
+  select(starts_with("d")) |>
+  collect()
 
-  # Reorder columns
-  result <- gpu_mtcars |>
-    select(hp, mpg, wt) |>
-    collect()
-}
+# Reorder columns
+result <- gpu_mtcars |>
+  select(hp, mpg, wt) |>
+  collect()
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link{filter.tbl_gpu}} for filtering rows,

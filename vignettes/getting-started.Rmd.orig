@@ -1,0 +1,207 @@
+---
+title: "Getting started with cuplyr"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Getting started with cuplyr}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+<!-- Generated from getting-started.Rmd.orig by tools/vignettes-knit; edit that file instead. -->
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+cuplyr runs dplyr verbs on an NVIDIA GPU through the RAPIDS cuDF library. You
+write the same dplyr code. Only the table type changes.
+
+```{r setup}
+library(cuplyr)
+library(dplyr)
+```
+
+The GPU pays off on large data, usually above 10 million rows. Below about
+100,000 rows, copying the data to the GPU costs more than it saves, so plain
+dplyr is the better choice there.
+
+## Basic workflow
+
+Copy a data frame to the GPU with `tbl_gpu()`, use dplyr verbs on it, and bring
+the result back to R with `collect()`. The original data frame is not changed.
+
+```{r create-tbl}
+gpu_cars <- tbl_gpu(mtcars)
+gpu_cars
+```
+
+```{r complete-example}
+tbl_gpu(mtcars) |>
+  filter(mpg > 15) |>
+  mutate(power_to_weight = hp / wt) |>
+  group_by(cyl) |>
+  summarise(
+    n_cars = n(),
+    avg_mpg = mean(mpg),
+    avg_power_ratio = mean(power_to_weight),
+    best_mpg = max(mpg)
+  ) |>
+  arrange(desc(avg_mpg)) |>
+  collect()
+```
+
+## Common verbs
+
+These work as they do in dplyr:
+
+```{r verb-examples, eval=FALSE}
+filter(x > 10, y < 5)          # conditions are combined with AND
+filter(col_a > col_b)
+
+select(mpg, cyl, hp)
+select(-disp, -drat)
+select(fuel_economy = mpg)     # rename while selecting
+select(starts_with("d"))
+
+mutate(a = x + y, b = a * 2)   # later columns can use earlier ones
+mutate(mpg = mpg * 0.425)      # replace a column
+
+arrange(cyl, desc(mpg))
+
+group_by(cyl, gear) |>
+  summarise(
+    total = sum(mpg), average = mean(mpg),
+    minimum = min(mpg), maximum = max(mpg),
+    std_dev = sd(mpg), variance = var(mpg),
+    count = n()
+  )
+```
+
+## Column types
+
+| R type | GPU type | Notes |
+|--------|----------|-------|
+| `double` | FLOAT64 | |
+| `integer` | INT32 | |
+| `character` | STRING | |
+| `logical` | BOOL8 | |
+| `Date` | TIMESTAMP_DAYS | |
+| `POSIXct` | TIMESTAMP_MICROSECONDS | |
+| `factor` | INT32 | Integer codes on the GPU, levels kept in R. The schema labels it DICTIONARY32 |
+
+## Lazy and eager execution
+
+Tables are lazy by default. Each verb adds a step to a plan, and the plan runs
+when you call `collect()` or `compute()`. Before it runs, cuplyr optimizes it,
+for example by moving filters earlier and fusing steps.
+
+```{r lazy-mode}
+pipeline <- tbl_gpu(mtcars) |>
+  filter(mpg > 20) |>
+  mutate(x = hp * 2) |>
+  filter(cyl == 4)
+
+is_lazy(pipeline)          # TRUE
+has_pending_ops(pipeline)  # TRUE
+show_query(pipeline)       # the plan, as R code
+```
+
+Errors such as a missing column or a type mismatch still appear at the verb that
+causes them, not at `collect()`:
+
+```{r errors, error=TRUE}
+try(tbl_gpu(mtcars) |> filter(nonexistent_column > 5))
+try(tbl_gpu(mtcars) |> filter(mpg > "not a number"))
+```
+
+Printing a lazy table runs the plan and shows the first rows under a
+`# A tbl_gpu [lazy]:` header. It keeps no result, so printing twice runs the plan
+twice.
+
+In eager mode each verb runs right away, which helps when you step through a
+pipeline:
+
+```{r eager-mode}
+eager_tbl <- tbl_gpu(mtcars, lazy = FALSE)
+is_lazy(eager_tbl)  # FALSE
+```
+
+To make every table eager, set `options(cuplyr.exec_mode = "eager")` or the
+environment variable `CUPLYR_EXEC_MODE=eager`. The `lazy` argument of
+`tbl_gpu()` overrides both. `cuplyr_options()` lists every option with its
+current value, and `?"cuplyr-options"` documents them.
+
+## Reusing an intermediate result
+
+`compute()` runs the pending steps and keeps the result on the GPU. Use it when
+several analyses start from the same base, so the shared steps run once:
+
+```{r compute}
+base_data <- tbl_gpu(mtcars) |>
+  filter(mpg > 15) |>
+  mutate(power_ratio = hp / wt) |>
+  compute()
+
+four_cyl <- base_data |> filter(cyl == 4) |> collect()
+six_cyl <- base_data |> filter(cyl == 6) |> collect()
+```
+
+## Memory
+
+R's garbage collector frees a table's GPU memory once nothing refers to it.
+`gpu_memory_state()` shows current use, and `gpu_gc()` frees unreferenced
+tables right away.
+
+```{r memory}
+gpu_memory_state()
+```
+
+```{r gc, eval=FALSE}
+gpu_gc()
+```
+
+## Tips
+
+Filter and select early so later steps handle less data. Keep pipelines lazy so
+the optimizer can work on them. Call `collect()` once, at the end, so only the
+final result is copied back to R.
+
+## Next steps
+
+- `vignette("query-optimization")` explains the optimizer.
+- `vignette("performance")` has timings and memory use for lazy and eager mode,
+  and shows where the GPU is slower.
+- `vignette("memory")` covers GPU memory resources and when memory is freed.
+- See also `?tbl_gpu`, `?compute` and `?gpu_memory_state`.
+
+## Installation
+
+The conda package `r-cuplyr` on the `bbtheo` channel is a binary for RAPIDS
+26.10 and CUDA 13. It needs an NVIDIA driver that supports CUDA 13, but no
+CUDA toolkit or compiler:
+
+```bash
+conda install -c bbtheo -c rapidsai -c conda-forge -c nvidia r-cuplyr
+```
+
+With pixi, run `pixi add r-cuplyr` in a project with the same channels. To
+build from source, use the install script; the
+[README](https://github.com/bbtheo/cuplyr#installation) has both routes. Then
+check the installation from R:
+
+```r
+library(cuplyr)
+verify_installation()  # runs a small GPU round trip
+check_deps()           # lists anything missing
+diagnostics()          # system details for a bug report
+```
+
+## System requirements
+
+- NVIDIA GPU with compute capability 7.5 (Turing) or newer
+- CUDA Toolkit 12.2 or later (RAPIDS 26.x is tested with CUDA 13, which the installers and pixi use)
+- RAPIDS libcudf 26.02 or newer (developed and tested on 26.10)
+- R 4.3.0 or later

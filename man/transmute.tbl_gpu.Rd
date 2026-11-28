@@ -34,12 +34,12 @@ in \code{...} come first (in \code{group_vars()} order); a grouping column that 
 mentioned in \code{...} takes its dot's position instead.
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  gpu_mtcars <- tbl_gpu(mtcars)
+gpu_mtcars <- tbl_gpu(mtcars)
 
-  result <- gpu_mtcars |>
-    transmute(kpl = mpg * 0.425, cyl) |>
-    collect()
-}
+result <- gpu_mtcars |>
+  transmute(kpl = mpg * 0.425, cyl) |>
+  collect()
+\dontshow{\}) # examplesIf}
 }

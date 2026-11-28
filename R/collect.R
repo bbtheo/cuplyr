@@ -68,22 +68,20 @@
 #' @export
 #' @importFrom dplyr collect
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
+#' gpu_mtcars <- tbl_gpu(mtcars)
 #'
-#'   # Process on GPU, then collect
-#'   result <- gpu_mtcars |>
-#'     filter(mpg > 20) |>
-#'     mutate(kpl = mpg * 0.425) |>
-#'     select(mpg, kpl, hp) |>
-#'     collect()
+#' # Process on GPU, then collect
+#' result <- gpu_mtcars |>
+#'   filter(mpg > 20) |>
+#'   mutate(kpl = mpg * 0.425) |>
+#'   select(mpg, kpl, hp) |>
+#'   collect()
 #'
-#'   # Result is a regular tibble
-#'   class(result)
-#'   print(result)
-#' }
+#' # Result is a regular tibble
+#' class(result)
+#' print(result)
 collect.tbl_gpu <- function(x, ...) {
   out <- collect_frame(x)
 

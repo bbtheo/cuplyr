@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # R CMD check of this worktree under the GPU lock.
 #
-#   tools/check [--out DIR] [R CMD check args...]
+#   tools/check [--out DIR] [--no-gpu] [R CMD check args...]
 #
 # Builds the source tarball with scripts/build-tarball.sh, then runs
 # R CMD check on it with the check settings of `pixi run check`
@@ -13,25 +13,53 @@
 # log is DIR/cuplyr.Rcheck/00check.log and the tests' output
 # DIR/cuplyr.Rcheck/tests/testthat.Rout(.fail).
 #
+# --no-gpu (first, alone or with --out) checks the package as a machine without
+# a GPU would (#138). CUPLYR_DISABLE_GPU=true makes has_gpu() FALSE and an empty
+# CUDA_VISIBLE_DEVICES hides the device, so an example or vignette that is not
+# guarded and touches the GPU fails instead of quietly running. The tarball is
+# built WITH vignettes (one more compile of the package; needs pandoc) and
+# checked without --ignore-vignettes, so the shipped precomputed vignettes are
+# built too. _R_CHECK_CRAN_INCOMING_REMOTE_ defaults to false so --as-cran needs
+# no network. Extra arguments still go to R CMD check:
+#   tools/check --no-gpu --as-cran --no-tests
+#
 # The install compiles with CUPLYR_WERROR_DEPRECATED=1 (deprecated declarations
 # are errors); set it to 0 to check without.
 source "$(dirname "$0")/lib.sh"
 cd "$CUPLYR_WT_ROOT"
 
 out="$CUPLYR_WT_ROOT/scratchpad/check"
-if [[ "${1:-}" == "--out" ]]; then
-  out="$2"
-  shift 2
-fi
+no_gpu=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --out) out="$2"; shift 2 ;;
+    --no-gpu) no_gpu=true; shift ;;
+    *) break ;;
+  esac
+done
 export CUPLYR_WERROR_DEPRECATED="${CUPLYR_WERROR_DEPRECATED:-1}"
+build_args=()
+check_args=(--no-manual --ignore-vignettes)
+if $no_gpu; then
+  export CUPLYR_DISABLE_GPU=true
+  export CUDA_VISIBLE_DEVICES=
+  export _R_CHECK_CRAN_INCOMING_REMOTE_="${_R_CHECK_CRAN_INCOMING_REMOTE_:-false}"
+  build_args=(--build-vignettes)
+  check_args=(--no-manual)
+fi
 mkdir -p "$out"
 out="$(cd "$out" && pwd)"
 
+# Arguments: out, count and list of build args, count and list of check args,
+# then the extra arguments for R CMD check.
 exec "$(dirname "$0")/gpu-run" --label check -- bash -c '
   set -euo pipefail
-  out="$1"; shift
+  out="$1"; nb="$2"; shift 2
+  build_args=("${@:1:$nb}"); shift "$nb"
+  nc="$1"; shift
+  check_args=("${@:1:$nc}"); shift "$nc"
   rm -f "$out"/cuplyr_*.tar.gz
-  scripts/build-tarball.sh --out-dir "$out"
+  scripts/build-tarball.sh --out-dir "$out" "${build_args[@]}"
   cd "$out"
-  _R_CHECK_FORCE_SUGGESTS_=false R CMD check --no-manual --ignore-vignettes "$@" cuplyr_*.tar.gz
-' check "$out" "$@"
+  _R_CHECK_FORCE_SUGGESTS_=false R CMD check "${check_args[@]}" "$@" cuplyr_*.tar.gz
+' check "$out" "${#build_args[@]}" "${build_args[@]}" "${#check_args[@]}" "${check_args[@]}" "$@"

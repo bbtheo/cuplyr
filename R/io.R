@@ -423,16 +423,14 @@ parquet_diff <- function(want, got) {
 #'
 #' @seealso [tbl_gpu()], [collect.tbl_gpu()]
 #' @export
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   path <- tempfile(fileext = ".parquet")
-#'   write_parquet_gpu(tbl_gpu(mtcars), path)
-#'   read_parquet_gpu(path) |>
-#'     filter(mpg > 25) |>
-#'     collect()
-#'   unlink(path)
-#' }
+#' path <- tempfile(fileext = ".parquet")
+#' write_parquet_gpu(tbl_gpu(mtcars), path)
+#' read_parquet_gpu(path) |>
+#'   filter(mpg > 25) |>
+#'   collect()
+#' unlink(path)
 read_parquet_gpu <- function(path, columns = NULL, lazy = NULL) {
   if (!is.character(path) || length(path) == 0L || anyNA(path)) {
     rlang::abort("`path` must be a character vector of file paths.", class = "cuplyr_error_parquet")

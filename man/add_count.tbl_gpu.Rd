@@ -38,11 +38,11 @@ group, as \code{dplyr::add_count()} does. It runs on the GPU: rows keep their
 original order, and \code{NA} keys form one group, as in dplyr.
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  gpu_mtcars <- tbl_gpu(mtcars)
-  gpu_mtcars |> add_count(cyl) |> collect()
-}
+gpu_mtcars <- tbl_gpu(mtcars)
+gpu_mtcars |> add_count(cyl) |> collect()
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link{count.tbl_gpu}}

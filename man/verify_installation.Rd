@@ -37,12 +37,12 @@ returns correct results
 }
 }
 \examples{
-\dontrun{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 result <- verify_installation()
 if (result$ok) {
   message("cuplyr is working!")
 }
-}
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link[=check_deps]{check_deps()}} for pre-install dependency checks,

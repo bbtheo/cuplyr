@@ -22,16 +22,16 @@ Computes the ratio of GPU memory usage to R object size for a \code{tbl_gpu}
 object. A high ratio confirms that data is stored on GPU, not in R.
 }
 \examples{
-if (has_gpu()) {
-  # Create a larger dataset
-  df <- data.frame(matrix(runif(10000), ncol = 10))
-  gpu_df <- tbl_gpu(df)
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
+# Create a larger dataset
+df <- data.frame(matrix(runif(10000), ncol = 10))
+gpu_df <- tbl_gpu(df)
 
-  comparison <- gpu_size_comparison(gpu_df)
-  cat("R object:", round(comparison$r_bytes / 1024, 1), "KB\n")
-  cat("GPU data:", round(comparison$gpu_bytes / 1024, 1), "KB\n")
-  cat("Ratio:", round(comparison$ratio, 1), "x\n")
-}
+comparison <- gpu_size_comparison(gpu_df)
+cat("R object:", round(comparison$r_bytes / 1024, 1), "KB\n")
+cat("GPU data:", round(comparison$gpu_bytes / 1024, 1), "KB\n")
+cat("Ratio:", round(comparison$ratio, 1), "x\n")
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link{verify_gpu_data}} for boolean verification,

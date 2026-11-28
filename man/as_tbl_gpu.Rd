@@ -19,10 +19,10 @@ Converts a data frame or compatible object to a \code{tbl_gpu} object,
 transferring data to GPU memory.
 }
 \examples{
-if (has_gpu()) {
-  gpu_df <- as_tbl_gpu(iris)
-  print(gpu_df)
-}
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
+gpu_df <- as_tbl_gpu(iris)
+print(gpu_df)
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link{tbl_gpu}} for details on GPU table creation

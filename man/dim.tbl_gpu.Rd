@@ -23,7 +23,7 @@ changed). \code{ncol()}/\code{NCOL()} only need the column count, so they are an
 from the schema without running anything.
 }
 \examples{
-if (has_gpu()) {
-  dim(tbl_gpu(mtcars))
-}
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
+dim(tbl_gpu(mtcars))
+\dontshow{\}) # examplesIf}
 }

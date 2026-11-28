@@ -71,31 +71,31 @@ sorts in dplyr on the CPU.
 }
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  gpu_mtcars <- tbl_gpu(mtcars)
+gpu_mtcars <- tbl_gpu(mtcars)
 
-  # Sort by single column (ascending)
-  sorted <- gpu_mtcars |>
-    arrange(mpg) |>
-    collect()
+# Sort by single column (ascending)
+sorted <- gpu_mtcars |>
+  arrange(mpg) |>
+  collect()
 
-  # Sort descending
-  sorted_desc <- gpu_mtcars |>
-    arrange(desc(mpg)) |>
-    collect()
+# Sort descending
+sorted_desc <- gpu_mtcars |>
+  arrange(desc(mpg)) |>
+  collect()
 
-  # Multiple columns: primary and secondary sort keys
-  sorted_multi <- gpu_mtcars |>
-    arrange(cyl, desc(mpg)) |>
-    collect()
+# Multiple columns: primary and secondary sort keys
+sorted_multi <- gpu_mtcars |>
+  arrange(cyl, desc(mpg)) |>
+  collect()
 
-  # With grouped data
-  grouped_sort <- gpu_mtcars |>
-    group_by(cyl) |>
-    arrange(mpg, .by_group = TRUE) |>
-    collect()
-}
+# With grouped data
+grouped_sort <- gpu_mtcars |>
+  group_by(cyl) |>
+  arrange(mpg, .by_group = TRUE) |>
+  collect()
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link{filter.tbl_gpu}} for filtering rows,

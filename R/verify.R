@@ -33,12 +33,10 @@
 #'
 #' @importFrom cli col_green col_red
 #' @export
-#' @examples
-#' \dontrun{
+#' @examplesIf has_gpu()
 #' result <- verify_installation()
 #' if (result$ok) {
 #'   message("cuplyr is working!")
-#' }
 #' }
 verify_installation <- function() {
   result <- list(

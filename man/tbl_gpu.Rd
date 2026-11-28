@@ -162,24 +162,24 @@ that ran on the CPU. A fractional \code{Date} is floored with its own warning,
 }
 }
 \examples{
+\dontshow{if (has_gpu()) withAutoprint(\{ # examplesIf}
 library(dplyr)
-if (has_gpu()) {
-  # Transfer mtcars to GPU (lazy by default)
-  gpu_mtcars <- tbl_gpu(mtcars)
-  print(gpu_mtcars)
+# Transfer mtcars to GPU (lazy by default)
+gpu_mtcars <- tbl_gpu(mtcars)
+print(gpu_mtcars)
 
-  # Operations are deferred until collect()
-  result <- tbl_gpu(mtcars) |>
-    filter(mpg > 20) |>
-    mutate(kpl = mpg * 0.425) |>
-    collect()
+# Operations are deferred until collect()
+result <- tbl_gpu(mtcars) |>
+  filter(mpg > 20) |>
+  mutate(kpl = mpg * 0.425) |>
+  collect()
 
-  # Eager mode: each verb runs at once
-  eager_tbl <- tbl_gpu(mtcars, lazy = FALSE)
+# Eager mode: each verb runs at once
+eager_tbl <- tbl_gpu(mtcars, lazy = FALSE)
 
-  # Or make every new table eager:
-  # options(cuplyr.exec_mode = "eager")
-}
+# Or make every new table eager:
+# options(cuplyr.exec_mode = "eager")
+\dontshow{\}) # examplesIf}
 }
 \seealso{
 \code{\link{collect.tbl_gpu}} to transfer data back to R,

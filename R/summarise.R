@@ -287,35 +287,33 @@
 #' @export
 #' @importFrom dplyr summarise summarize
 #'
-#' @examples
+#' @examplesIf has_gpu()
 #' library(dplyr)
-#' if (has_gpu()) {
-#'   gpu_mtcars <- tbl_gpu(mtcars)
+#' gpu_mtcars <- tbl_gpu(mtcars)
 #'
-#'   # Simple aggregation over all rows
-#'   total <- gpu_mtcars |>
-#'     summarise(avg_mpg = mean(mpg)) |>
-#'     collect()
+#' # Simple aggregation over all rows
+#' total <- gpu_mtcars |>
+#'   summarise(avg_mpg = mean(mpg)) |>
+#'   collect()
 #'
-#'   # Grouped aggregation
-#'   by_cyl <- gpu_mtcars |>
-#'     group_by(cyl) |>
-#'     summarise(
-#'       avg_mpg = mean(mpg),
-#'       max_hp = max(hp),
-#'       count = n()
-#'     ) |>
-#'     collect()
+#' # Grouped aggregation
+#' by_cyl <- gpu_mtcars |>
+#'   group_by(cyl) |>
+#'   summarise(
+#'     avg_mpg = mean(mpg),
+#'     max_hp = max(hp),
+#'     count = n()
+#'   ) |>
+#'   collect()
 #'
-#'   # Multiple grouping columns
-#'   by_cyl_gear <- gpu_mtcars |>
-#'     group_by(cyl, gear) |>
-#'     summarise(
-#'       mean_mpg = mean(mpg),
-#'       min_wt = min(wt)
-#'     ) |>
-#'     collect()
-#' }
+#' # Multiple grouping columns
+#' by_cyl_gear <- gpu_mtcars |>
+#'   group_by(cyl, gear) |>
+#'   summarise(
+#'     mean_mpg = mean(mpg),
+#'     min_wt = min(wt)
+#'   ) |>
+#'   collect()
 summarise.tbl_gpu <- function(.data, ..., .groups = NULL, .by = NULL) {
   # Captured at this call depth so it matches exactly what dplyr's own
   # `summarise.grouped_df()` captures via its own `caller_env()` call --
