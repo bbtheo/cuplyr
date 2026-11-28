@@ -221,9 +221,11 @@ test_that("#146: cuplyr's sources never silence a deprecation", {
   files <- list.files(src, pattern = "\\.(c|cc|cpp|h|hpp|cu|cuh)$|^Makevars", full.names = TRUE)
   files <- files[basename(files) != "Makevars"]  # generated; Makevars.in is checked
   pattern <- paste(
-    c('diagnostic\\s+(ignored|warning)\\s+"-Wdeprecated',
+    c('diagnostic\\s+(ignored|warning)\\s+\\\\?"-Wdeprecated',  # #pragma and _Pragma("...\\"...")
       "-Wno-deprecated", "-Wno-error", "IGNORE_DEPRECATED", "DISABLE_DEPRECATION",
-      "_SILENCE_[A-Z_]*DEPRECAT"),
+      "_SILENCE_[A-Z_]*DEPRECAT",
+      "pragma\\s+GCC\\s+system_header",    # silences every diagnostic below it
+      "(^|[\\s=\"'])-w([\\s\"']|$)"),        # drops all warnings
     collapse = "|"
   )
   hits <- unlist(lapply(files, function(f) {
@@ -255,11 +257,83 @@ test_that("#146: a POSIXct mean still rounds half away from zero, eager, lazy, g
     got <- collect(summarise(group_by(gt, g), m = median(t)))
     expect_identical(as.numeric(got$m), want, label = paste("median, lazy =", lazy))
   }
+  # Equal values in [2^52, 2^53) microseconds (year 2112 on): every mean is an
+  # integer and must come back unchanged. floor(|f| + 0.5) would tie an odd
+  # count to the even one above it.
+  big_us <- 2^52 + c(1, 3, 5, 7, 1001, 123457, 2^51 - 1)
+  big <- tibble::tibble(g = rep(seq_along(big_us), each = 2),
+                        t = .POSIXct(rep(big_us / 1e6, each = 2), tz = "UTC"))
+  for (lazy in c(FALSE, TRUE)) {
+    gt <- tbl_gpu(big, lazy = lazy)
+    stored <- as.numeric(collect(gt)$t)[c(TRUE, FALSE)]
+    got <- collect(summarise(gt, m = mean(t), .by = g))
+    expect_identical(as.numeric(got$m), stored, label = paste("mean past 2^52, lazy =", lazy))
+    got <- collect(mutate(gt, m = mean(t), .by = g))
+    expect_identical(as.numeric(got$m), rep(stored, each = 2),
+                     label = paste("windowed mean past 2^52, lazy =", lazy))
+    got <- collect(summarise(gt, m = median(t), .by = g))
+    expect_identical(as.numeric(got$m), stored, label = paste("median past 2^52, lazy =", lazy))
+  }
   # NA and an all-NA group stay NA.
   na <- tibble::tibble(g = c(1L, 1L, 2L), t = .POSIXct(c(1e-6, NA, NA), tz = "UTC"))
   got <- collect(summarise(tbl_gpu(na), m = mean(t, na.rm = TRUE), n = mean(t), .by = g))
   expect_identical(is.na(got$m), c(FALSE, TRUE))
   expect_identical(is.na(got$n), c(TRUE, TRUE))
+})
+
+test_that("#146: src/Makevars.in stays portable make (no GNU extensions)", {
+  p146_skip_if_no_source_tree()
+  # The package check warns on these in src/Makevars(.in) ("checking for GNU
+  # extensions in Makefiles"); main passes that check.
+  lines <- readLines(file.path(p146_root(), "src", "Makevars.in"), warn = FALSE)
+  code <- lines[!grepl("^\\s*#", lines)]
+  gnu <- "\\+=|:=|\\?=|!=|^\\s*(ifeq|ifneq|ifdef|ifndef|else|endif)\\b|\\$\\(shell|\\$\\(wildcard|\\.NOTPARALLEL"
+  expect_identical(grep(gnu, code, value = TRUE, perl = TRUE), character())
+  # Every placeholder sits inside an assignment, never on a line of its own
+  # (make is run on Makevars.in for some checks).
+  expect_false(any(grepl("^\\s*@[A-Z_]+@\\s*$", code)))
+})
+
+test_that("#146: the check fails when the switch does not reach the compiler", {
+  p146_skip_if_no_source_tree()
+  # A configure or Makevars.in that lost the switch must not pass silently:
+  # strip the deprecation placeholder from the probe's Makevars.in.
+  probe <- c('#include "cuplyr_compat.hpp"', 'extern "C" int cuplyr_probe_ok() { return 0; }')
+  dir <- p146_mini_pkg(list(probe.cpp = probe))
+  mi <- file.path(dir, "src", "Makevars.in")
+  lines <- readLines(mi, warn = FALSE)
+  stripped <- gsub("@[A-Z_]*DEPRECAT[A-Z_]*@", "", lines)
+  expect_false(identical(stripped, lines), label = "Makevars.in has a deprecation placeholder")
+  writeLines(stripped, mi)
+  res <- p146_run_check(dir)
+  out <- paste(res$output, collapse = "\n")
+  expect_false(identical(res$status, 0L), label = paste("check exit status\n", out))
+  expect_match(out, "deprecations: FAIL[^\n]*-Werror=deprecated-declarations", perl = TRUE)
+
+  # Not a package: FAIL with a reason, no PASS.
+  empty <- withr::local_tempdir("cuplyr146-empty-")
+  res <- p146_run_check(empty)
+  out <- paste(res$output, collapse = "\n")
+  expect_false(identical(res$status, 0L))
+  expect_match(out, "deprecations: FAIL (", fixed = TRUE)
+  expect_false(grepl("deprecations: PASS", out, fixed = TRUE))
+})
+
+test_that("#146: one check run lists the call sites of every file", {
+  p146_skip_if_no_source_tree()
+  # make -k: porting to a new RAPIDS needs every call site, not the first file's.
+  dep <- '[[deprecated("probe146")]] inline int cuplyr_probe_old_api() { return 1; }'
+  dir <- p146_mini_pkg(list(
+    probe_a.cpp = c(dep, 'extern "C" int cuplyr_probe_a() { return cuplyr_probe_old_api(); }'),
+    probe_b.cpp = c(dep, 'extern "C" int cuplyr_probe_b() { return cuplyr_probe_old_api(); }')
+  ))
+  res <- p146_run_check(dir)
+  summary <- p146_summary(res$output)
+  expect_false(identical(res$status, 0L))
+  expect_true(any(grepl("probe_a\\.cpp:[0-9]+:[0-9]+: error: ", summary)),
+              label = paste("summary lists probe_a.cpp\n", paste(summary, collapse = "\n")))
+  expect_true(any(grepl("probe_b\\.cpp:[0-9]+:[0-9]+: error: ", summary)),
+              label = paste("summary lists probe_b.cpp\n", paste(summary, collapse = "\n")))
 })
 
 test_that("#146: the merge gate and the release check run with deprecations as errors", {
