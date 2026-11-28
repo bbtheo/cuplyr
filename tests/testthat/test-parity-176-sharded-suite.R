@@ -9,7 +9,9 @@
 # in tools/run-tests-lib.R, which has no side effects when sourced.
 #
 # The child runs use CUPLYR_MEMORY_POOL=0 so each fixture process holds only a
-# CUDA context, not a memory pool.
+# CUDA context, not a memory pool (except the run that checks the shards' pool
+# settings). No run may rebuild the package library: the suite's other shards
+# load it while these run.
 
 p176_root <- function() {
   normalizePath(testthat::test_path("..", ".."), mustWork = FALSE)
@@ -42,13 +44,24 @@ p176_run <- function(args, env = character()) {
   p176_lib()
   gpu_free_for_child()
   rscript <- file.path(R.home("bin"), "Rscript")
+  vars <- c(CUPLYR_MEMORY_POOL = "0")
+  vars[names(env)] <- env
   out <- withr::with_dir(root, withr::with_envvar(
-    c(CUPLYR_MEMORY_POOL = "0", env),
+    vars,
     suppressWarnings(system2(rscript, c("tools/run-tests.R", args),
                              stdout = TRUE, stderr = TRUE))
   ))
   list(status = as.integer(attr(out, "status") %||% 0L), output = as.character(out))
 }
+
+# The built library's size, mtime and md5, to show no run rebuilt it.
+p176_so_state <- function() {
+  so <- file.path(p176_root(), "src", paste0("cuplyr", .Platform$dynlib.ext))
+  if (!file.exists(so)) return(NULL)
+  info <- file.info(so)
+  list(size = info$size, mtime = info$mtime, md5 = unname(tools::md5sum(so)))
+}
+p176_so_before <- p176_so_state()
 
 p176_read_tsv <- function(path) {
   utils::read.delim(path, sep = "\t", quote = "", stringsAsFactors = FALSE,
@@ -448,6 +461,16 @@ p176_expect_crash_reported <- function(r) {
   # the file the shard finished before it died keeps its result
   expect_true(all(res$status[res$file == "test-b.R"] == "pass"))
   expect_true(any(grepl("[error] test-c.R", r$output, fixed = TRUE)), info = log)
+  # the running file and the never-started file are told apart, naming the shard
+  c_err <- res$test[res$file == "test-c.R" & res$status == "error"]
+  d_err <- res$test[res$file == "test-d.R" & res$status == "error"]
+  expect_true(any(grepl("shard 2", c_err, fixed = TRUE) &
+                    grepl("while running", c_err, fixed = TRUE)), info = paste(c_err, collapse = " | "))
+  expect_false(any(grepl("not run", c_err, fixed = TRUE)), info = paste(c_err, collapse = " | "))
+  if (length(d_err)) {
+    expect_true(all(grepl("shard 2", d_err, fixed = TRUE) & grepl("not run", d_err, fixed = TRUE)),
+                info = paste(d_err, collapse = " | "))
+  }
 }
 
 test_that("#176: a shard killed mid-file fails the run and keeps its output", {
@@ -458,6 +481,83 @@ test_that("#176: a shard killed mid-file fails the run and keeps its output", {
 test_that("#176: a shard that exits 0 before finishing its files fails the run", {
   p176_skip()
   p176_expect_crash_reported(p176_crash_run("quit0"))
+})
+
+# --- the shards' memory settings and memory skips ---------------------------------
+
+# Parallel files p and q record their pool reservation and whether the pool
+# options are still set; q also skips for lack of GPU memory, which next to
+# other shards would hide a result. The serial file s does the same under the
+# default settings.
+p176_mem_fixture <- function(dir) {
+  w <- function(name, lines) writeLines(lines, file.path(dir, paste0("test-", name, ".R")))
+  rec <- function(x) c(
+    sprintf('test_that("%s records its pool", {', x),
+    '  st <- Sys.getenv("P176_STATE")',
+    sprintf('  writeLines(format(gpu_memory_state()$pool_bytes, scientific = FALSE), file.path(st, "pool-%s"))', x),
+    sprintf('  writeLines(as.character(c(is.null(getOption("cuplyr.pool_initial")), is.null(getOption("cuplyr.release_threshold")))), file.path(st, "opts-%s"))', x),
+    '  expect_true(TRUE)',
+    '})')
+  lowmem <- function(x) sprintf(
+    'test_that("%s low memory", { skip("Insufficient GPU memory: need 1 TB, have 1 GB") })', x)
+  w("p", rec("p"))
+  w("q", c(rec("q"), lowmem("q")))
+  w("s", c(rec("s"), lowmem("s")))
+  writeLines("test-s.R", file.path(dir, "serial.txt"))
+  dir
+}
+
+p176_mem_run <- function() {
+  if (!is.null(p176_cache[["mem"]])) return(p176_cache[["mem"]])
+  base <- tempfile("cuplyr176m-")
+  dir.create(base)
+  fix <- file.path(base, "tests")
+  state <- file.path(base, "state")
+  dir.create(fix)
+  dir.create(state)
+  p176_mem_fixture(fix)
+  out <- file.path(base, "results.tsv")
+  r <- p176_run(c("suite", "--dir", fix, "--shards", "2",
+                  "--serial-list", file.path(fix, "serial.txt"),
+                  "--durations", file.path(fix, "none.tsv"), "--out", out),
+                env = c(P176_STATE = state, CUPLYR_MEMORY_POOL = NA, CUPLYR_MEMORY_RESOURCE = NA,
+                        CUPLYR_POOL_INITIAL = NA, CUPLYR_RELEASE_THRESHOLD = NA))
+  r$out <- out
+  r$state <- state
+  p176_cache[["mem"]] <- r
+  r
+}
+
+test_that("#176: parallel shards load with no initial pool; the serial phase keeps the defaults", {
+  p176_skip()
+  r <- p176_mem_run()
+  log <- paste(r$output, collapse = "\n")
+  rd <- function(x) {
+    f <- file.path(r$state, x)
+    if (file.exists(f)) readLines(f) else NA_character_
+  }
+  pool_p <- as.numeric(rd("pool-p"))
+  pool_q <- as.numeric(rd("pool-q"))
+  pool_s <- as.numeric(rd("pool-s"))
+  expect_false(anyNA(c(pool_p, pool_q, pool_s)), info = log)
+  expect_lte(max(pool_p, pool_q), 64 * 2^20)
+  expect_gte(pool_s, 128 * 2^20)
+  # the options only reach the resource at load; tests see them unset
+  expect_identical(rd("opts-p"), c("TRUE", "TRUE"))
+  expect_identical(rd("opts-q"), c("TRUE", "TRUE"))
+  expect_identical(rd("opts-s"), c("TRUE", "TRUE"))
+})
+
+test_that("#176: a skip for lack of GPU memory in a parallel shard fails the run; alone it stays a skip", {
+  p176_skip()
+  r <- p176_mem_run()
+  log <- paste(r$output, collapse = "\n")
+  expect_identical(r$status, 1L, info = log)
+  res <- p176_read_tsv(r$out)
+  expect_identical(res$status[res$file == "test-q.R" & res$test == "q low memory"], "error")
+  expect_identical(res$status[res$file == "test-s.R" & res$test == "s low memory"], "skip")
+  expect_true(all(res$status[res$test %in% c("p records its pool", "q records its pool",
+                                             "s records its pool")] == "pass"), info = log)
 })
 
 # --- file mode -------------------------------------------------------------------
@@ -477,4 +577,11 @@ test_that("#176: tools/test-file mode records durations in the same columns", {
   expect_identical(names(res)[1:3], c("file", "test", "status"))
   expect_true(all(c("seconds", "file_seconds") %in% names(res)))
   expect_identical(res$test, c("a one", "a two", "a done"))
+})
+
+# Last in the file: every run above has finished.
+test_that("#176: no run rebuilt the package library", {
+  p176_skip()
+  skip_if(is.null(p176_so_before), "no built library to compare")
+  expect_identical(p176_so_state(), p176_so_before)
 })
