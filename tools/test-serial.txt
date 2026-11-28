@@ -1,5 +1,6 @@
-# Test files that run alone, after the parallel shards have finished
-# (tools/run-tests.R suite). One file name per line; '#' starts a comment.
+# Test files that run alone, after the parallel shards have finished, each in
+# a fresh R process, one after another (tools/run-tests.R suite). One file name
+# per line; '#' starts a comment.
 #
 # A file belongs here when its result depends on what else runs on the machine
 # at the same time: it asserts a wall-clock time, it asserts GPU memory amounts

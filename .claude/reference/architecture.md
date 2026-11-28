@@ -1710,26 +1710,58 @@ bench/ code starts are not scanned.
 ### How the suite runs (`tools/run-tests.R`, `tools/run-tests-lib.R`)
 `tools/test` and the merge gate call `Rscript tools/run-tests.R suite` inside
 one `tools/gpu-run` hold. `--shards 1` runs every file in this process in
-byte-order name order (what the runner always did). With more shards (default 4,
-`CUPLYR_TEST_SHARDS`, at most a third of the cores) the parent never loads the
-package (no GPU context of its own): it runs `cuplyr_ensure_optimized_dll()` once,
-plans with `suite_plan()` (files not in `tools/test-serial.txt`, longest first by
-`tools/test-durations.tsv`, each to the least loaded shard, ties by name and lowest
-index), starts one `Rscript tools/run-tests.R shard ...` child per shard (processx,
-output to a log per child; children inherit `CUPLYR_GPU_LOCK_HELD` and never take
-the lock), polls every second for liveness and the peak of `nvidia-smi` memory.used
-and host MemTotal - MemAvailable, then runs the serial-listed files in one more
-child once every shard has exited. A child writes `started <file>` before each
-file and the file's entry (rows, seconds) after it; the parent treats a file
-without an entry as unfinished whatever the exit status was, gives it an `error`
-row ("shard N stopped while running this file" or "not run: shard N died"), and
-prints every child's log. The merged `--out` table is in file-name order, tests in
-file order, with `seconds` (testthat's per-test `real`), `file_seconds` and `shard`
-after `file test status`. Shard children load with `compile = FALSE` and with
+byte-order name order (capital letters first; the old runner sorted in the
+session's locale). With more shards (default 3, `CUPLYR_TEST_SHARDS` or
+`--shards`; the default is capped at a third of the cores, an explicit count is
+not) the parent never loads the package (no GPU context of its own).
+
+Build once: every top-level run (`suite`, `file`, `perf`) calls
+`build_once()`, which runs `cuplyr_ensure_optimized_dll()` and then exports
+`CUPLYR_TEST_BUILT=<worktree path>`; a runner that sees it for its own worktree
+(a shard, or a run a test starts, as the #176 acceptance file does) skips the
+build and loads with `compile = FALSE`. `load_all(compile = TRUE)` would mean
+"clean and rebuild" and delete `src/cuplyr.so` under the other processes, which
+then load the R code with no native routines (`library.dynam2()` returns
+silently). The parent records the .so's size and mtime after the build and adds
+an `error` row if it differs at the end of the parallel or the serial phase.
+(`cuplyr_ensure_optimized_dll()` itself rebuilds everything on every call:
+configure rewrites `src/Makevars`, and pkgbuild counts `Makevars*` among the
+headers that make the .so stale, so `needs_clean()` adds `--preclean`; this is
+why any `tools/r` or `tools/conformance` start recompiles.)
+
+Plan and run: `suite_plan()` takes the files not in `tools/test-serial.txt`,
+longest first by `tools/test-durations.tsv`, each to the least loaded shard (ties:
+fewer files, lowest index; no shard is left empty), and starts one
+`Rscript tools/run-tests.R shard --parallel ...` child per shard (processx, output
+to a log per child; children inherit `CUPLYR_GPU_LOCK_HELD` and never take the
+lock). It waits, sampling `nvidia-smi` memory.used (5 s timeout) and host
+MemTotal - MemAvailable every second for the parallel phase's peaks, and prints
+`[k] started <file>` / `[k] finished <file>` as the children's event files grow.
+Then each serial-listed file runs in a child of its own, one after another,
+sampling only `/proc/meminfo` (no `nvidia-smi` next to the timing and memory
+files). The `PEAK:` line gives the memory in use before the first child, the
+parallel phase's peak GPU and host figures, and the serial phase's peak host.
+
+A child writes a tab-separated `started\t<file>` line before each file and the
+file's entry (rows, seconds) after it with `finished`; the parent treats a file
+without an entry as unfinished whatever the exit status was and gives it an
+`error` row: "shard N stopped while running this file (<how it died>)" when it
+had started, "not run: shard N died (<how>)" when it had not (the serial
+phase's process is named "the serial-phase process"). Such placeholder entries
+are left out of `--record-durations`. Every child's log is printed after the
+run. The merged `--out` table is in file-name order, tests in file order, with
+`seconds` (testthat's per-test `real`), `file_seconds` and `shard` after
+`file test status`.
+
+Memory: shard children load with
 `options(cuplyr.pool_initial = 0, cuplyr.release_threshold = 512 MiB)` set only
 around `load_all()` (the resource reads them once, in `.onLoad`; options, not
 environment variables, so the tests' own callr children keep the defaults); the
-serial phase runs with the defaults. `perf` and `file` mode stay in one process.
+serial files run with the defaults. In a parallel shard a test that skipped with
+a message starting "Insufficient GPU memory" (`skip_if_insufficient_gpu_memory()`)
+is reported as `error` (its name unchanged; the reason is in the `RUNNER:` log
+line and a `NOTE:` before `RESULT:`); in the serial phase and with `--shards 1`
+it stays a skip. `perf` and `file` mode stay in one process.
 
 ### Test Pattern
 ```r

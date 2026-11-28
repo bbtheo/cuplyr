@@ -66,10 +66,13 @@ expensive, so budget them:
   suspicion that needs checking). Pick the probes most likely to turn a
   reasoned blocker into a verified one.
 - Don't re-run the full suite, perf or conformance; the PM's tester already
-  did, or skipped them in a documentation-only round (see pm.md). If you
-  believe a gate result is wrong, or that a round the PM called
-  documentation-only changed behaviour, say so as a finding and ask the PM
-  to re-run it as a full round.
+  did, or skipped them: most rounds run the acceptance tests, the files the
+  coder named, perf and conformance, and the full suite runs once on the
+  final head; a documentation-only round runs test files only (see pm.md).
+  If you believe a gate result is wrong, that a change reaches code the named
+  files don't cover, or that a round the PM called documentation-only changed
+  behaviour, say so as a finding and ask the PM to re-run it (with the full
+  suite, if the change warrants it).
 - Anything you couldn't probe within the budget goes in as **reasoned**,
   with your argument.
 

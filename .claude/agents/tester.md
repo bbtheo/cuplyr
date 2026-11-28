@@ -33,23 +33,31 @@ WT/tools/conformance <files> --ids RUN_DIR/conformance.tsv --report RUN_DIR/conf
 WT/tools/r '<expr>' > RUN_DIR/r-<n>.log 2>&1            # when a reviewer asks
 ```
 
-Run them one after another, never in parallel, each as a foreground Bash
-call with `timeout: 600000`. Each run waits for the GPU lock on its own; the
-wait can be minutes if another feature's gate is running.
+Run them one after another, never in parallel. `tools/test-file`, `tools/perf`
+and `tools/conformance` are foreground Bash calls with `timeout: 600000`.
+Each run waits for the GPU lock on its own; the wait can be minutes if another
+feature's gate is running.
 
-`WT/tools/test` runs the suite in parallel shards and takes a fraction of the old
-time; its log has one section per shard, a `SLOWEST` block and a `PEAK:` line.
-When the prompt asks for a serial reference or fresh durations, run
+`WT/tools/test` runs the suite in parallel shards, then the timing and memory
+files one at a time; it takes 25 to 30 minutes (about 42 in one process), more
+than a foreground call's 10-minute limit. Start it with `run_in_background`,
+then wait for it (poll the log for the `RESULT:` line with an `until` loop, or
+wait for the background task to finish).
+Its log streams `[k] started <file>` lines while it runs, then has one section
+per process, a `SLOWEST` block and a `PEAK:` line. When the prompt asks for a
+serial reference or fresh durations, run
 `WT/tools/test --shards 1 --record-durations RUN_DIR/durations.tsv --out RUN_DIR/serial.tsv`
-(about 40 minutes: run it in the background and wait for it); when it asks for
-several sharded runs, give each its own `--out RUN_DIR/sharded-<k>.tsv`.
+(about 42 minutes, also in the background); when it asks for several sharded
+runs, give each its own `--out RUN_DIR/sharded-<k>.tsv`.
 
 If `test-memory-regression.R` is the only failure, rerun just that file once
 and report both results. Don't rerun anything else.
 
-Run exactly the runs the prompt lists. For a documentation-only round the PM
-lists only test files; don't add the full suite, perf or conformance. Report
-`SUITE`, `PERF` and `CONFORMANCE` as `not run (documentation-only round)`.
+Run exactly the runs the prompt lists. Most rounds list test files, perf and
+conformance but not the full suite (the PM asks for it once, on the final
+head); a documentation-only round lists only test files. Don't add runs the
+prompt doesn't list. Report what was not run as `not run (not requested)`, or
+`not run (documentation-only round)`.
 
 ## Report
 

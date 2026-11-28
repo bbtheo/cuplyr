@@ -146,13 +146,17 @@ runs the tests for you. This takes longer.
 
 ### How the suite runs
 
-The full suite takes about 40 minutes in one R process, so `pixi run test`
-splits it over several R processes that run at once under the same GPU lock:
+The full suite takes about 42 minutes in one R process, so `pixi run test`
+splits it over several R processes that run at once under the same GPU lock.
+It still takes 25 to 30 minutes, most of it the serial phase below: run it in
+the background.
 
 - The test files are dealt out to the shards by how long they took last time
   (`tools/test-durations.tsv`, longest first, each to the least loaded shard),
   so the same commit always gets the same split.
-- Files listed in `tools/test-serial.txt` run afterwards, alone. A file goes
+- Files listed in `tools/test-serial.txt` run afterwards, alone, one after
+  another, each in a fresh R process (so what a timing-sensitive file runs
+  after does not depend on which other files are on the list). A file goes
   on that list when its result depends on what else is running: it asserts a
   wall-clock time (`timing_medians()`, a bound on elapsed time), asserts GPU
   memory amounts or needs gigabytes free (a test that skips for lack of memory
@@ -160,20 +164,32 @@ splits it over several R processes that run at once under the same GPU lock:
   configuration of its own process. Add new files of that kind to the list,
   with a comment saying why. The list is not for a file that only passes in a
   particular order; fix that file.
-- Shards start with a smaller memory pool than a normal session (no initial
-  reservation, and unused memory goes back to the driver above 512 MiB), so
-  several of them fit on one card. The serial phase uses the defaults.
-- The run prints each shard's output, then the slowest files, a `PEAK:` line
-  with the GPU and host memory in use at the busiest moment, and the usual
-  `RESULT:` line. A shard that crashes or stops early fails the run: its
-  unfinished files get an `error` row and its output is kept.
+- The parallel shards use a smaller memory pool than a normal session (no
+  initial reservation, and unused memory goes back to the driver above
+  512 MiB), so several of them fit on one card. Only the serial files run
+  under the default memory configuration that users get. A test in a parallel
+  shard that skips for lack of GPU memory (`skip_if_insufficient_gpu_memory()`)
+  is reported as an error, because the card is fuller next to other shards:
+  move that file to the serial list or free the GPU.
+- The library is compiled once, before anything starts; the shards and the
+  runs that tests start themselves only load it. If `src/cuplyr.so` changes
+  while the suite runs, the run reports an error.
+- The run prints `[k] started <file>` as each shard begins a file, then each
+  process's output, then the slowest files, a `PEAK:` line with the GPU and
+  host memory in use before the first child starts and at the busiest moment of
+  each phase (the GPU is not sampled during the serial phase), and the usual
+  `RESULT:` line. A shard that crashes or stops early fails the run: the file
+  it was running and the files it had not started get an `error` row, and its
+  output is kept.
 
 Set the number of shards with `CUPLYR_TEST_SHARDS=N` or `--shards N`
-(`pixi run test --shards 2`). The default is 4, never more than a third of
-the cores. `--shards 1` runs everything in one process in file order, like the
-old runner: use it to check whether a failure comes from running in parallel.
-Every file's wall time, and every test's, is in the `--out` table
-(`seconds`, `file_seconds` and `shard` columns).
+(`pixi run test --shards 2`). The default is 3, or a third of the cores when
+that is fewer; an explicit count is used as given. `--shards 1` runs
+everything in one process in byte order of the file names, whatever the
+locale (the order may differ from earlier runs, which sorted in the session's
+locale): use it to check whether a failure comes from running in parallel. Every file's wall
+time, and every test's, is in the `--out` table (`seconds`, `file_seconds`
+and `shard` columns).
 
 `tools/test-durations.tsv` only steers the split; a file missing from it gets
 the median duration. To refresh it after the suite has changed a lot, run
