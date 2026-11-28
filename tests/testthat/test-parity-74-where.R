@@ -52,7 +52,10 @@ test_that("#74: where() after a lubridate date part in the same mutate()", {
   skip_if_no_gpu()
   skip_if_not_installed("lubridate")
   df <- p74_where_df()
-  p74_native(df, function(d) mutate(d, y = lubridate::year(dte), across(where(is.double), ~ .x + 1)))
+  # (no POSIXct column here: is.double() is TRUE for it, and POSIXct + 1 is a
+  # CPU step of its own)
+  no_t <- df[names(df) != "t"]
+  p74_native(no_t, function(d) mutate(d, y = lubridate::year(dte), across(where(is.double), ~ .x + 1)))
   p74_native(df, function(d) mutate(d, y = lubridate::year(dte), across(where(is.integer), ~ .x + 1L)))
   p74_native(df, function(d) mutate(d, m = lubridate::month(t), across(where(is.numeric), ~ .x * 2)))
   p74_native(df, function(d) mutate(d, dd = lubridate::day(dte), q = lubridate::quarter(dte),
@@ -64,7 +67,8 @@ test_that("#74: where() after a lubridate date part in the same mutate()", {
 test_that("#74: where() after roll_*() in the same mutate()", {
   skip_if_no_gpu()
   df <- p74_where_df()
-  p74_native(df, function(d) mutate(d, r = roll_sum(v, 2), across(where(is.double), ~ .x + 1)))
+  no_t <- df[names(df) != "t"]
+  p74_native(no_t, function(d) mutate(d, r = roll_sum(v, 2), across(where(is.double), ~ .x + 1)))
   p74_native(df, function(d) mutate(d, r = roll_mean(i, 2), across(where(is.numeric), ~ .x * 2)))
   p74_native(df, function(d) mutate(d, r = roll_sd(v, 3), across(where(is.numeric), ~ .x - 1)))
   p74_native(df, function(d) mutate(d, r = roll_max(v, 2), across(where(is.numeric), ~ -.x), .by = g))
