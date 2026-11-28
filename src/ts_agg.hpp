@@ -27,7 +27,7 @@
 #include <cudf/unary.hpp>
 #include <cudf/column/column_factories.hpp>
 #include <cudf/copying.hpp>
-#include <cudf/round.hpp>
+#include <cudf/ast/expressions.hpp>
 #include "cuplyr_compat.hpp"
 
 #include <memory>
@@ -76,17 +76,33 @@ inline std::unique_ptr<cudf::column> float64_to_ts(std::unique_ptr<cudf::column>
         fractional = any->is_valid() &&
                      static_cast<cudf::numeric_scalar<bool>*>(any.get())->value();
     } else {
-        // Half away from zero, like llround(). cudf::round() (deprecated, but
-        // the only floating-point rounding) does it in one kernel and exactly
-        // past 2^52 microseconds (2112), where floor(|f| + 0.5) ties to even.
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-#endif
-        whole = cudf::round(f->view(), 0, cudf::rounding_method::HALF_UP);
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic pop
-#endif
+        // Half away from zero, like llround(), in one AST kernel. t = trunc(f)
+        // (CAST_TO_INT64 truncates toward zero) and d = f - t is exact, so
+        // whole = t + (d >= 0.5) - (d <= -0.5). Exact at every magnitude: past
+        // 2^52 microseconds (2112) every double is an integer, d is 0 and
+        // floor(|f| + 0.5) would tie to even; t + 1 is exact because a
+        // non-zero d means |f| < 2^52.
+        namespace ast = cudf::ast;
+        cudf::numeric_scalar<double> half(0.5);
+        cudf::numeric_scalar<double> neg_half(-0.5);
+        ast::tree tree;
+        auto const& x = tree.emplace<ast::column_reference>(0);
+        auto const& lit_half = tree.emplace<ast::literal>(half);
+        auto const& lit_neg_half = tree.emplace<ast::literal>(neg_half);
+        auto const& t = tree.emplace<ast::operation>(
+            ast::ast_operator::CAST_TO_FLOAT64,
+            tree.emplace<ast::operation>(ast::ast_operator::CAST_TO_INT64, x));
+        auto const& d = tree.emplace<ast::operation>(ast::ast_operator::SUB, x, t);
+        auto const& up = tree.emplace<ast::operation>(
+            ast::ast_operator::CAST_TO_FLOAT64,
+            tree.emplace<ast::operation>(ast::ast_operator::GREATER_EQUAL, d, lit_half));
+        auto const& down = tree.emplace<ast::operation>(
+            ast::ast_operator::CAST_TO_FLOAT64,
+            tree.emplace<ast::operation>(ast::ast_operator::LESS_EQUAL, d, lit_neg_half));
+        auto const& rounded = tree.emplace<ast::operation>(
+            ast::ast_operator::SUB,
+            tree.emplace<ast::operation>(ast::ast_operator::ADD, t, up), down);
+        whole = cudf::compute_column(cudf::table_view({f->view()}), rounded);
     }
     auto ints = cudf::cast(whole->view(), int_type);
     return std::make_unique<cudf::column>(cudf::bit_cast(ints->view(), cudf::data_type{target}));

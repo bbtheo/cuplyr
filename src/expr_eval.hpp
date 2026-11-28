@@ -74,7 +74,6 @@
 #include <cudf/null_mask.hpp>
 #include <cudf/reduction.hpp>
 #include <cudf/replace.hpp>
-#include <cudf/round.hpp>
 #include <cudf/scalar/scalar.hpp>
 #include <cudf/search.hpp>
 #include <cudf/stream_compaction.hpp>
