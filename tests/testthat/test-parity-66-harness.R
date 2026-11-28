@@ -107,8 +107,9 @@ p66_excluded <- data.frame(
     "computes `by` group data in order of appearance",
     "extracts existing data when `by = NULL`",
     # these three pass in the run only because a relaxed `error = TRUE`
-    # snapshot credits any error: compute_by() fails on the `[` of the
-    # tbl_gpu before it reaches dplyr's grouped/rowwise check
+    # snapshot credits any error: dplyr's grouped/rowwise check in
+    # compute_by() is an inherits() test a grouped tbl_gpu doesn't meet, so
+    # compute_by() goes on and fails on the `[` of the tbl_gpu instead
     "can't set `.by` with a grouped-df",
     "can't set `.by` with a rowwise-df",
     "can tweak the error args",
@@ -185,8 +186,17 @@ test_that("prepending a class to an uploaded fixture keeps it a tbl_gpu", {
     '  class(df) <- c("p66cls", class(df))',
     '  expect_identical(base::class(df), c("p66cls", "tbl_gpu", "tbl"))',
     '  expect_identical(class(df), c("p66cls", "data.frame"))',
+    '  expect_s3_class(df, c("p66cls", "data.frame"), exact = TRUE)',
+    '  expect_s3_class(df, class(df), exact = TRUE)',
+    '})',
+    'test_that("data.frame fixture subclass is not a bare data.frame", {',
+    '  df <- data.frame(x = 1:3)',
+    '  class(df) <- c("p66cls", class(df))',
+    '  expect_s3_class(df, "data.frame", exact = TRUE)',
     '})'
   ))
+  # as on plain dplyr: a subclassed data.frame is not exactly a data.frame
+  expect_equal(p66_row(res, "data.frame fixture subclass is not a bare data.frame")$raw_status, "fail")
   for (t in c("fixture subclass", "data.frame fixture subclass")) {
     row <- p66_row(res, t)
     expect_equal(row$raw_status, "pass", info = paste(t, row$message))

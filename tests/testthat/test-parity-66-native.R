@@ -57,6 +57,7 @@ test_that("`.by` with a grouped or rowwise table errors as in dplyr", {
     expect_error(dplyr::summarise(dplyr::group_by(d, x), n = dplyr::n(), .by = x), grouped, fixed = TRUE)
     expect_error(dplyr::mutate(dplyr::group_by(d, x), n = dplyr::n(), .by = x), grouped, fixed = TRUE)
     expect_error(dplyr::summarise(dplyr::rowwise(d), n = dplyr::n(), .by = x), rowwise, fixed = TRUE)
+    expect_error(dplyr::mutate(dplyr::rowwise(d), n = dplyr::n(), .by = x), rowwise, fixed = TRUE)
   }
 })
 
